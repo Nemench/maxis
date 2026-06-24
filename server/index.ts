@@ -10,6 +10,7 @@ import usersRouter from "./routes/users.js";
 import productsRouter from "./routes/products.js";
 import ordersRouter from "./routes/orders.js";
 import settingsRouter from "./routes/settings.js";
+import reportsRouter from "./routes/reports.js";
 
 export const db = new KotDatabase();
 db.initialize();
@@ -33,6 +34,7 @@ app.use("/api/users", usersRouter);
 app.use("/api/products", productsRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api/settings", settingsRouter);
+app.use("/api/reports", reportsRouter);
 
 if (isProd) {
   // Serve built React app

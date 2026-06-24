@@ -43,7 +43,7 @@ export const api = {
     updateDeptStatus: (id: number, department: Department, status: DeptStatus) =>
       req<Order>("PATCH", `/orders/${id}/dept-status`, { department, status }),
     export: (from: string, to: string) =>
-      req<Order[]>("GET", `/orders/export?from=${from}&to=${to}`)
+      req<Order[]>("GET", `/reports?from=${from}&to=${to}`)
   },
   settings: {
     get: () => req<Record<string, string>>("GET", "/settings"),
