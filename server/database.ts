@@ -1,0 +1,299 @@
+import BetterSqlite3 from "better-sqlite3";
+import bcrypt from "bcryptjs";
+import path from "node:path";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import type {
+  Product, ProductInput,
+  Order, OrderItem, CreateOrderInput, OrderStatus,
+  User, UserInput,
+  Department, DeptStatus, DeliveryAddress
+} from "../src/shared/types.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+export class KotDatabase {
+  private db!: BetterSqlite3.Database;
+
+  initialize() {
+    const dataDir = path.join(process.cwd(), "data");
+    fs.mkdirSync(dataDir, { recursive: true });
+    this.db = new BetterSqlite3(path.join(dataDir, "butcher-kot.sqlite"));
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("foreign_keys = ON");
+    this.migrate();
+    this.seed();
+  }
+
+  // ── Users ──────────────────────────────────────────────────────────────────
+
+  listUsers(): User[] {
+    return this.db
+      .prepare("SELECT id, name, role, department, isActive, createdAt FROM users ORDER BY name")
+      .all() as User[];
+  }
+
+  getUser(id: number): User | null {
+    return this.db
+      .prepare("SELECT id, name, role, department, isActive, createdAt FROM users WHERE id = ?")
+      .get(id) as User | null;
+  }
+
+  getUserByName(name: string): (User & { pin: string }) | null {
+    return this.db
+      .prepare("SELECT id, name, pin, role, department, isActive, createdAt FROM users WHERE lower(name) = lower(?) AND isActive = 1")
+      .get(name) as (User & { pin: string }) | null;
+  }
+
+  createUser(input: UserInput): User {
+    const hash = bcrypt.hashSync(input.pin, 10);
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare("INSERT INTO users (name, pin, role, department, isActive, createdAt) VALUES (?, ?, ?, ?, 1, ?)")
+      .run(input.name.trim(), hash, input.role, input.department ?? null, now);
+    return this.getUser(Number(result.lastInsertRowid))!;
+  }
+
+  updateUser(id: number, input: Partial<UserInput & { isActive: number }>): User {
+    const user = this.getUser(id);
+    if (!user) throw new Error("User not found");
+    const now = new Date().toISOString();
+    if (input.pin) {
+      this.db.prepare("UPDATE users SET pin = ?, updatedAt = ? WHERE id = ?").run(bcrypt.hashSync(input.pin, 10), now, id);
+    }
+    if (input.name !== undefined) {
+      this.db.prepare("UPDATE users SET name = ?, updatedAt = ? WHERE id = ?").run(input.name.trim(), now, id);
+    }
+    if (input.role !== undefined) {
+      this.db.prepare("UPDATE users SET role = ?, updatedAt = ? WHERE id = ?").run(input.role, now, id);
+    }
+    if (input.department !== undefined) {
+      this.db.prepare("UPDATE users SET department = ?, updatedAt = ? WHERE id = ?").run(input.department, now, id);
+    }
+    if (input.isActive !== undefined) {
+      this.db.prepare("UPDATE users SET isActive = ?, updatedAt = ? WHERE id = ?").run(input.isActive, now, id);
+    }
+    return this.getUser(id)!;
+  }
+
+  // ── Products ───────────────────────────────────────────────────────────────
+
+  listProducts(): Product[] {
+    return this.db
+      .prepare("SELECT id, name, category, unitDefault, pricePerUnit, prepNotes, department, isActive, createdAt, updatedAt FROM products WHERE isActive = 1 ORDER BY category, name")
+      .all() as Product[];
+  }
+
+  upsertProduct(input: ProductInput): Product {
+    const now = new Date().toISOString();
+    if (input.id) {
+      this.db
+        .prepare("UPDATE products SET name=?, category=?, unitDefault=?, pricePerUnit=?, prepNotes=?, department=?, updatedAt=? WHERE id=?")
+        .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, now, input.id);
+      return this.db.prepare("SELECT * FROM products WHERE id = ?").get(input.id) as Product;
+    } else {
+      const result = this.db
+        .prepare("INSERT INTO products (name, category, unitDefault, pricePerUnit, prepNotes, department, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)")
+        .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, now, now);
+      return this.db.prepare("SELECT * FROM products WHERE id = ?").get(Number(result.lastInsertRowid)) as Product;
+    }
+  }
+
+  deleteProduct(id: number): void {
+    this.db.prepare("UPDATE products SET isActive = 0, updatedAt = ? WHERE id = ?").run(new Date().toISOString(), id);
+  }
+
+  // ── Orders ─────────────────────────────────────────────────────────────────
+
+  createOrder(input: CreateOrderInput, requestedById: number): Order {
+    const now = new Date().toISOString();
+    const ticketNumber = this.nextTicketNumber();
+    const hasKitchen = input.items.some((i) => i.department === "kitchen");
+    const hasCounter = input.items.some((i) => i.department === "counter");
+    const kitchenStatus: DeptStatus = hasKitchen ? "New" : "n/a";
+    const counterStatus: DeptStatus = hasCounter ? "New" : "n/a";
+
+    const result = this.db
+      .prepare("INSERT INTO orders (ticketNumber, customerName, customerPhone, orderType, deliveryAddress, requestedTime, status, kitchenStatus, counterStatus, requestedById, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?)")
+      .run(ticketNumber, input.customerName.trim(), input.customerPhone.trim(), input.orderType, JSON.stringify(input.deliveryAddress), input.requestedTime.trim(), kitchenStatus, counterStatus, requestedById, now, now);
+
+    const orderId = Number(result.lastInsertRowid);
+    const insertItem = this.db.prepare(
+      "INSERT INTO order_items (orderId, productId, name, kg, quantity, notes, unitPrice, lineTotal, department) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    );
+    for (const item of input.items) {
+      insertItem.run(orderId, item.productId ?? null, item.name.trim(), item.kg ?? null, item.quantity ?? null, item.notes.trim(), item.unitPrice ?? null, item.lineTotal ?? null, item.department);
+    }
+    return this.getOrder(orderId);
+  }
+
+  listOrders(scope: "active" | "history" | "all", department?: Department | null): Order[] {
+    let rows: Order[];
+    const base = "SELECT o.*, u.name as requestedByName FROM orders o LEFT JOIN users u ON o.requestedById = u.id";
+    if (scope === "active") {
+      rows = this.db.prepare(`${base} WHERE o.status IN ('New','Received','Ready') ORDER BY o.createdAt ASC`).all() as Order[];
+    } else if (scope === "history") {
+      rows = this.db.prepare(`${base} WHERE o.status = 'Done' ORDER BY o.updatedAt DESC LIMIT 200`).all() as Order[];
+    } else {
+      rows = this.db.prepare(`${base} ORDER BY o.createdAt DESC LIMIT 300`).all() as Order[];
+    }
+    if (department) {
+      rows = rows.filter((o) => (department === "kitchen" ? o.kitchenStatus : o.counterStatus) !== "n/a");
+    }
+    return rows.map((o) => ({ ...this.parseOrder(o), items: this.listOrderItems(o.id) }));
+  }
+
+  getOrder(id: number): Order {
+    const order = this.db
+      .prepare("SELECT o.*, u.name as requestedByName FROM orders o LEFT JOIN users u ON o.requestedById = u.id WHERE o.id = ?")
+      .get(id) as Order | null;
+    if (!order) throw new Error(`Order ${id} not found`);
+    return { ...this.parseOrder(order), items: this.listOrderItems(id) };
+  }
+
+  updateOrderStatus(id: number, status: OrderStatus): Order {
+    this.db.prepare("UPDATE orders SET status = ?, updatedAt = ? WHERE id = ?").run(status, new Date().toISOString(), id);
+    return this.getOrder(id);
+  }
+
+  updateDeptStatus(id: number, department: Department, status: DeptStatus): Order {
+    const col = department === "kitchen" ? "kitchenStatus" : "counterStatus";
+    const now = new Date().toISOString();
+    this.db.prepare(`UPDATE orders SET ${col} = ?, updatedAt = ? WHERE id = ?`).run(status, now, id);
+
+    // Resolve overall status from both department statuses
+    const row = this.db.prepare("SELECT kitchenStatus, counterStatus FROM orders WHERE id = ?").get(id) as { kitchenStatus: string; counterStatus: string };
+    const active = [row.kitchenStatus, row.counterStatus].filter((s) => s !== "n/a");
+    let overall: OrderStatus = "New";
+    if (active.every((s) => s === "Done")) overall = "Done";
+    else if (active.some((s) => s === "Ready" || s === "Done")) overall = "Ready";
+    else if (active.some((s) => s === "Received")) overall = "Received";
+    this.db.prepare("UPDATE orders SET status = ?, updatedAt = ? WHERE id = ?").run(overall, now, id);
+
+    return this.getOrder(id);
+  }
+
+  // ── Private ────────────────────────────────────────────────────────────────
+
+  private parseOrder(raw: Order & { deliveryAddress: string }): Order {
+    let deliveryAddress: DeliveryAddress = { street: "", area: "", buildingType: "", apartment: "" };
+    try { deliveryAddress = JSON.parse(raw.deliveryAddress as unknown as string) as DeliveryAddress; } catch { /* old or empty */ }
+    return { ...raw, deliveryAddress };
+  }
+
+  private listOrderItems(orderId: number): OrderItem[] {
+    return this.db
+      .prepare("SELECT id, orderId, productId, name, kg, quantity, notes, unitPrice, lineTotal, department FROM order_items WHERE orderId = ? ORDER BY id ASC")
+      .all(orderId) as OrderItem[];
+  }
+
+  private nextTicketNumber(): string {
+    const d = new Date();
+    const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+    const prefix = `${stamp}-`;
+    const row = this.db.prepare("SELECT ticketNumber FROM orders WHERE ticketNumber LIKE ? ORDER BY id DESC LIMIT 1").get(`${prefix}%`) as { ticketNumber: string } | null;
+    const next = row ? Number(row.ticketNumber.slice(prefix.length)) + 1 : 1;
+    return `${prefix}${String(next).padStart(3, "0")}`;
+  }
+
+  private migrate() {
+    // One-time migration: "staff" role was split into "cashier" / "counter" / "kitchen"
+    const hasStaff = (this.db.prepare("SELECT COUNT(*) as n FROM sqlite_master WHERE type='table' AND name='users'").get() as { n: number }).n > 0
+      && (this.db.prepare("SELECT COUNT(*) as n FROM users WHERE role = 'staff'").get() as { n: number }).n > 0;
+    if (hasStaff) {
+      this.db.prepare("UPDATE users SET role = 'cashier', department = NULL WHERE role = 'staff' AND lower(name) LIKE '%cashier%'").run();
+      this.db.prepare("UPDATE users SET role = 'counter', department = 'counter' WHERE role = 'staff'").run();
+    }
+
+    // Add orderType column if missing (existing databases)
+    const ordersExists = (this.db.prepare("SELECT COUNT(*) as n FROM sqlite_master WHERE type='table' AND name='orders'").get() as { n: number }).n > 0;
+    if (ordersExists) {
+      const cols = (this.db.prepare("PRAGMA table_info(orders)").all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes("orderType")) {
+        this.db.exec("ALTER TABLE orders ADD COLUMN orderType TEXT NOT NULL DEFAULT 'pickup'");
+      }
+      if (!cols.includes("deliveryAddress")) {
+        this.db.exec("ALTER TABLE orders ADD COLUMN deliveryAddress TEXT NOT NULL DEFAULT '{}'");
+      }
+      if (!cols.includes("requestedTime")) {
+        this.db.exec("ALTER TABLE orders ADD COLUMN requestedTime TEXT NOT NULL DEFAULT ''");
+      }
+    }
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        pin TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'staff',
+        department TEXT,
+        isActive INTEGER NOT NULL DEFAULT 1,
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS products (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT '',
+        unitDefault TEXT NOT NULL DEFAULT 'kg',
+        pricePerUnit REAL,
+        prepNotes TEXT NOT NULL DEFAULT '',
+        department TEXT NOT NULL DEFAULT 'counter',
+        isActive INTEGER NOT NULL DEFAULT 1,
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticketNumber TEXT NOT NULL UNIQUE,
+        customerName TEXT NOT NULL,
+        customerPhone TEXT NOT NULL,
+        orderType TEXT NOT NULL DEFAULT 'pickup',
+        deliveryAddress TEXT NOT NULL DEFAULT '{}',
+        requestedTime TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'New',
+        kitchenStatus TEXT NOT NULL DEFAULT 'n/a',
+        counterStatus TEXT NOT NULL DEFAULT 'n/a',
+        requestedById INTEGER REFERENCES users(id),
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS order_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        orderId INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        productId INTEGER REFERENCES products(id),
+        name TEXT NOT NULL,
+        kg REAL,
+        quantity INTEGER,
+        notes TEXT NOT NULL DEFAULT '',
+        unitPrice REAL,
+        lineTotal REAL,
+        department TEXT NOT NULL DEFAULT 'counter'
+      );
+    `);
+  }
+
+  private seed() {
+    const { count } = this.db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
+    if (count > 0) return;
+
+    const now = new Date().toISOString();
+    this.db.prepare("INSERT INTO users (name, pin, role, department, isActive, createdAt) VALUES (?, ?, 'admin', NULL, 1, ?)").run("Admin", bcrypt.hashSync("0000", 10), now);
+
+    const ins = this.db.prepare("INSERT INTO products (name, category, unitDefault, pricePerUnit, prepNotes, department, isActive, createdAt, updatedAt) VALUES (?, ?, 'kg', 0, ?, ?, 1, ?, ?)");
+    for (const [name, category, prepNotes, dept] of [
+      ["Beef Mince",       "Beef",    "Pack fresh",                  "counter"],
+      ["Rump Steak",       "Beef",    "Cut to requested thickness",  "counter"],
+      ["Boerewors",        "Sausage", "Coil and pack",               "counter"],
+      ["Lamb Chops",       "Lamb",    "Trim excess fat",             "counter"],
+      ["Chicken Fillets",  "Poultry", "Skinless",                    "counter"],
+      ["Roast Chicken",    "Poultry", "Full roast",                  "kitchen"],
+      ["Chicken Wings",    "Poultry", "Crispy fried",                "kitchen"],
+    ]) {
+      ins.run(name, category, prepNotes, dept, now, now);
+    }
+  }
+}

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-electron/
+release/
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.*
+maxis logo.jpg
