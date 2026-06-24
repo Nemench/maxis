@@ -851,7 +851,12 @@ function ReportsPanel() {
                         <td><span className={`order-type-badge ${o.orderType}`}>{o.orderType === "delivery" ? "Delivery" : "Pickup"}</span></td>
                         <td>{o.requestedTime ? formatRequestedTime(o.requestedTime) : "—"}</td>
                         <td><span className="badge">{o.status}</span></td>
-                        <td>{o.items.length}</td>
+                        <td>
+                          {o.items.map((item, idx) => {
+                            const qty = [item.kg ? `${item.kg}kg` : "", item.quantity ? `×${item.quantity}` : ""].filter(Boolean).join(" ");
+                            return <div key={idx}>{item.name}{qty ? ` · ${qty}` : ""}</div>;
+                          })}
+                        </td>
                         <td>{orderTotal > 0 ? currency.format(orderTotal) : "—"}</td>
                         <td>{o.requestedByName ?? "—"}</td>
                       </tr>
