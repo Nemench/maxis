@@ -1,6 +1,8 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
+  BarChart2,
   ClipboardList,
+  FileDown,
   History,
   LogOut,
   Package,
@@ -28,7 +30,7 @@ import type {
 } from "../shared/types";
 import { api } from "./api";
 
-type Tab = "orders" | "queue" | "history" | "products" | "users" | "settings";
+type Tab = "orders" | "queue" | "history" | "products" | "users" | "settings" | "reports";
 
 const deptStatusFlow: DeptStatus[] = ["New", "Received", "Ready", "Done"];
 const emptyLine: OrderItemInput = { productId: null, name: "", kg: null, quantity: null, notes: "", unitPrice: null, lineTotal: null, department: "counter" };
@@ -180,6 +182,9 @@ function MainApp({ currentUser, onLogout }: { currentUser: User; onLogout: () =>
           {currentUser.role === "admin" && (
             <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}><Settings size={18} /> Settings</button>
           )}
+          {currentUser.role === "admin" && (
+            <button className={tab === "reports" ? "active" : ""} onClick={() => setTab("reports")}><BarChart2 size={18} /> Reports</button>
+          )}
         </nav>
         <div className="sidebar-footer">
           <button className="secondary" onClick={onLogout}><LogOut size={16} /> Sign out</button>
@@ -211,6 +216,7 @@ function MainApp({ currentUser, onLogout }: { currentUser: User; onLogout: () =>
         {tab === "settings" && currentUser.role === "admin" && (
           <SettingsPanel autoPrint={autoPrint} onAutoPrintChange={setAutoPrint} />
         )}
+        {tab === "reports" && currentUser.role === "admin" && <ReportsPanel />}
       </main>
     </div>
   );
@@ -731,6 +737,135 @@ function SettingsPanel({ autoPrint, onAutoPrintChange }: { autoPrint: boolean; o
   );
 }
 
+// ── Reports (admin) ───────────────────────────────────────────────────────────
+
+function ReportsPanel() {
+  const today = new Date().toISOString().slice(0, 10);
+  const [from, setFrom] = useState(today);
+  const [to, setTo] = useState(today);
+  const [orders, setOrders] = useState<Order[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadOrders = async () => {
+    if (from > to) { setError("'From' must be on or before 'To'"); return; }
+    setLoading(true); setError(""); setOrders(null);
+    try {
+      setOrders(await api.orders.export(from, to));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load orders");
+    } finally { setLoading(false); }
+  };
+
+  const downloadCsv = () => {
+    if (!orders) return;
+    const header = ["Ticket", "Date Created", "Customer", "Phone", "Type", "Delivery Address", "Requested Time", "Status", "Kitchen Status", "Counter Status", "Created By", "Completed At", "Item", "Dept", "Kg", "Qty", "Unit Price (R/kg)", "Line Total (R)"];
+    const rows: string[][] = [header];
+
+    for (const o of orders) {
+      const dateFmt = new Date(o.createdAt).toLocaleString(appSettings.locale);
+      const completedFmt = o.status === "Done" ? new Date(o.updatedAt).toLocaleString(appSettings.locale) : "";
+      const addr = o.orderType === "delivery" && o.deliveryAddress?.street
+        ? [o.deliveryAddress.street, o.deliveryAddress.area, o.deliveryAddress.apartment ? `Apt ${o.deliveryAddress.apartment}` : ""].filter(Boolean).join(", ")
+        : "";
+      const orderCols = [o.ticketNumber, dateFmt, o.customerName, o.customerPhone, o.orderType, addr, o.requestedTime, o.status, o.kitchenStatus, o.counterStatus, o.requestedByName ?? "", completedFmt];
+
+      if (o.items.length === 0) {
+        rows.push([...orderCols, "", "", "", "", "", ""]);
+      } else {
+        for (const item of o.items) {
+          rows.push([
+            ...orderCols,
+            item.name, item.department,
+            item.kg != null ? String(item.kg) : "",
+            item.quantity != null ? String(item.quantity) : "",
+            item.unitPrice != null ? item.unitPrice.toFixed(2) : "",
+            item.lineTotal != null ? item.lineTotal.toFixed(2) : ""
+          ]);
+        }
+      }
+    }
+
+    const csv = rows.map((r) => r.map((c) => `"${c.replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `maxis-orders-${from}-to-${to}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const totalValue = orders?.reduce((sum, o) => sum + o.items.reduce((s, i) => s + (i.lineTotal ?? 0), 0), 0) ?? 0;
+
+  return (
+    <div className="panel reports-panel">
+      <h2>Order Reports</h2>
+      <div className="report-controls">
+        <label>From<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+        <label>To<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
+        <button type="button" onClick={() => void loadOrders()} disabled={loading}>
+          {loading ? "Loading…" : "View"}
+        </button>
+        {orders && orders.length > 0 && (
+          <button type="button" className="secondary" onClick={downloadCsv}>
+            <FileDown size={16} /> Download CSV
+          </button>
+        )}
+      </div>
+      {error && <div className="form-message">{error}</div>}
+
+      {orders !== null && (
+        orders.length === 0
+          ? <p className="report-empty">No orders found between {from} and {to}.</p>
+          : <>
+            <div className="report-summary">
+              <strong>{orders.length}</strong> order{orders.length !== 1 ? "s" : ""}
+              {totalValue > 0 && <> &nbsp;·&nbsp; Total value: <strong>{currency.format(totalValue)}</strong></>}
+            </div>
+            <div className="table-panel">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Ticket</th>
+                    <th>Date</th>
+                    <th>Customer</th>
+                    <th>Phone</th>
+                    <th>Type</th>
+                    <th>Requested Time</th>
+                    <th>Status</th>
+                    <th>Items</th>
+                    <th>Total</th>
+                    <th>Created by</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {orders.map((o) => {
+                    const orderTotal = o.items.reduce((s, i) => s + (i.lineTotal ?? 0), 0);
+                    return (
+                      <tr key={o.id}>
+                        <td><strong>{o.ticketNumber}</strong></td>
+                        <td>{new Date(o.createdAt).toLocaleString(appSettings.locale)}</td>
+                        <td>{o.customerName}</td>
+                        <td>{o.customerPhone}</td>
+                        <td><span className={`order-type-badge ${o.orderType}`}>{o.orderType === "delivery" ? "Delivery" : "Pickup"}</span></td>
+                        <td>{o.requestedTime ? formatRequestedTime(o.requestedTime) : "—"}</td>
+                        <td><span className="badge">{o.status}</span></td>
+                        <td>{o.items.length}</td>
+                        <td>{orderTotal > 0 ? currency.format(orderTotal) : "—"}</td>
+                        <td>{o.requestedByName ?? "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+      )}
+    </div>
+  );
+}
+
 // ── Print ─────────────────────────────────────────────────────────────────────
 
 function printReceipt(order: Order, type: "kitchen" | "counter" | "master") {
@@ -897,7 +1032,7 @@ function calculateLineTotal(item: OrderItemInput) {
 }
 
 function tabTitle(tab: Tab) {
-  return { orders: "New Order", queue: "Prep Queue", history: "Order History", products: "Stock", users: "Users", settings: "Settings" }[tab];
+  return { orders: "New Order", queue: "Prep Queue", history: "Order History", products: "Stock", users: "Users", settings: "Settings", reports: "Reports" }[tab];
 }
 
 function tabSubtitle(tab: Tab) {
@@ -907,6 +1042,7 @@ function tabSubtitle(tab: Tab) {
     history: "Review completed tickets.",
     settings: "System configuration.",
     products: "Manage stock items and prices.",
-    users: "Manage staff accounts and PINs."
+    users: "Manage staff accounts and PINs.",
+    reports: "View and download orders for a date range."
   }[tab];
 }

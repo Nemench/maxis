@@ -1,11 +1,23 @@
 import { Router } from "express";
 import { db } from "../index.js";
-import { requireAuth } from "../auth.js";
+import { requireAuth, requireAdmin } from "../auth.js";
 import type { AuthRequest } from "../auth.js";
 import type { CreateOrderInput, OrderStatus, Department, DeptStatus } from "../../src/shared/types.js";
 
 const router = Router();
 router.use(requireAuth);
+
+// Export orders by date range — must be before /:id to avoid "export" being matched as an ID
+router.get("/export", requireAdmin, (req, res) => {
+  const from = req.query.from as string;
+  const to = req.query.to as string;
+  if (!from || !to) { res.status(400).json({ message: "from and to are required (YYYY-MM-DD)" }); return; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+    res.status(400).json({ message: "Date must be in YYYY-MM-DD format" }); return;
+  }
+  if (from > to) { res.status(400).json({ message: "'from' must not be after 'to'" }); return; }
+  res.json(db.listOrdersInRange(from, to));
+});
 
 router.get("/", (req: AuthRequest, res) => {
   const scope = (req.query.scope as string) || "active";

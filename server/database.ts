@@ -183,6 +183,50 @@ export class KotDatabase {
     return orders;
   }
 
+  listOrdersInRange(from: string, to: string): Order[] {
+    const sql = `
+      SELECT o.id, o.ticketNumber, o.customerName, o.customerPhone, o.orderType,
+             o.deliveryAddress, o.requestedTime, o.status, o.kitchenStatus, o.counterStatus,
+             o.requestedById, o.createdAt, o.updatedAt, u.name as requestedByName,
+             oi.id as oi_id, oi.productId as oi_productId, oi.name as oi_name,
+             oi.kg as oi_kg, oi.quantity as oi_quantity, oi.notes as oi_notes,
+             oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.department as oi_dept
+      FROM orders o
+      LEFT JOIN users u ON o.requestedById = u.id
+      LEFT JOIN order_items oi ON o.id = oi.orderId
+      WHERE substr(o.createdAt, 1, 10) >= ? AND substr(o.createdAt, 1, 10) <= ?
+      ORDER BY o.createdAt ASC
+      LIMIT 100000`;
+
+    const allRows = this.db.prepare(sql).all(from, to) as Record<string, unknown>[];
+    const orderMap = new Map<number, Order>();
+
+    for (const row of allRows) {
+      const id = row.id as number;
+      if (!orderMap.has(id)) {
+        const order = this.parseOrder(row as Order & { deliveryAddress: string });
+        order.items = [];
+        orderMap.set(id, order);
+      }
+      if (row.oi_id != null) {
+        orderMap.get(id)!.items.push({
+          id: row.oi_id as number,
+          orderId: id,
+          productId: row.oi_productId as number | null,
+          name: row.oi_name as string,
+          kg: row.oi_kg as number | null,
+          quantity: row.oi_quantity as number | null,
+          notes: row.oi_notes as string,
+          unitPrice: row.oi_unitPrice as number | null,
+          lineTotal: row.oi_lineTotal as number | null,
+          department: row.oi_dept as Department,
+        });
+      }
+    }
+
+    return Array.from(orderMap.values());
+  }
+
   getOrder(id: number): Order {
     const order = this.db
       .prepare("SELECT o.*, u.name as requestedByName FROM orders o LEFT JOIN users u ON o.requestedById = u.id WHERE o.id = ?")

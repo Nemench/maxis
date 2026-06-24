@@ -804,3 +804,57 @@ th {
   color: var(--muted);
   margin: 0;
 }
+
+/* ── Reports panel ── */
+.reports-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.reports-panel h2 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--blue-dark);
+}
+
+.report-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.report-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+}
+
+.report-controls input[type="date"] {
+  min-width: 160px;
+  height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 14px;
+}
+
+.report-summary {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.report-empty {
+  color: var(--muted);
+  font-size: 14px;
+  padding: 32px 0;
+}
