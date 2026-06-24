@@ -85,20 +85,28 @@ for i in $(seq 1 30); do
 done
 pct exec "$CTID" -- bash -c "echo ok" &>/dev/null || error "Container did not become ready in time"
 
-# ── Force DNS (in case DHCP didn't set it) ────────────────────────────────────
+# ── Force DNS — remove symlink (Debian 12 uses systemd-resolved) and write real file
 info "Configuring DNS..."
-pct exec "$CTID" -- bash -c "echo -e 'nameserver 8.8.8.8\nnameserver 8.8.4.4' > /etc/resolv.conf"
+pct exec "$CTID" -- bash -c "rm -f /etc/resolv.conf && printf 'nameserver 8.8.8.8\nnameserver 8.8.4.4\n' > /etc/resolv.conf"
 
-# ── Wait for network (DHCP may still be negotiating) ─────────────────────────
-info "Waiting for network..."
-for i in $(seq 1 15); do
-  if pct exec "$CTID" -- bash -c "curl -sf --max-time 3 https://deb.debian.org > /dev/null 2>&1"; then
+# ── Wait for DHCP to assign a default route ──────────────────────────────────
+info "Waiting for network (DHCP)..."
+for i in $(seq 1 30); do
+  if pct exec "$CTID" -- bash -c "ip route show default | grep -q default" &>/dev/null; then
     break
   fi
   sleep 2
 done
+pct exec "$CTID" -- bash -c "ip route show default | grep -q default" \
+  || error "Container has no default route after 60s. Check that $BRIDGE is connected to your network."
 
-# ── Bootstrap curl (it may already be present) ───────────────────────────────
+# ── Verify internet reachability (by IP, not DNS) ────────────────────────────
+if ! pct exec "$CTID" -- bash -c "ping -c1 -W5 8.8.8.8 > /dev/null 2>&1"; then
+  error "Container cannot reach the internet (ping 8.8.8.8 failed). Check your Proxmox bridge/firewall."
+fi
+ok "Network is up"
+
+# ── Bootstrap curl ────────────────────────────────────────────────────────────
 info "Bootstrapping container..."
 pct exec "$CTID" -- bash -c "
   export DEBIAN_FRONTEND=noninteractive
