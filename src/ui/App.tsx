@@ -636,8 +636,12 @@ function UsersPanel() {
   };
 
   const toggleActive = async (user: User) => {
-    await api.users.update(user.id, { isActive: user.isActive ? 0 : 1 });
-    await load();
+    try {
+      await api.users.update(user.id, { isActive: user.isActive ? 0 : 1 });
+      await load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : "Could not update user");
+    }
   };
 
   const startEdit = (user: User) => {

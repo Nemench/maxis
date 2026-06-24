@@ -57,6 +57,10 @@ export class KotDatabase {
   updateUser(id: number, input: Partial<UserInput & { isActive: number }>): User {
     const user = this.getUser(id);
     if (!user) throw new Error("User not found");
+    if (input.isActive === 0 && user.role === "admin") {
+      const { count } = this.db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin' AND isActive = 1 AND id != ?").get(id) as { count: number };
+      if (count === 0) throw new Error("Cannot deactivate the only active admin account");
+    }
     const now = new Date().toISOString();
     if (input.pin) {
       this.db.prepare("UPDATE users SET pin = ?, updatedAt = ? WHERE id = ?").run(bcrypt.hashSync(input.pin, 10), now, id);
