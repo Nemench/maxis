@@ -115,7 +115,7 @@ export class KotDatabase {
 
     const result = this.db
       .prepare("INSERT INTO orders (ticketNumber, customerName, customerPhone, orderType, deliveryAddress, requestedTime, status, kitchenStatus, counterStatus, requestedById, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?)")
-      .run(ticketNumber, input.customerName.trim(), input.customerPhone.trim(), input.orderType, JSON.stringify(input.deliveryAddress), input.requestedTime.trim(), kitchenStatus, counterStatus, requestedById, now, now);
+      .run(ticketNumber, input.customerName.trim(), input.customerPhone.trim(), input.orderType, input.orderType === "delivery" ? JSON.stringify(input.deliveryAddress) : null, input.requestedTime.trim(), kitchenStatus, counterStatus, requestedById, now, now);
 
     const orderId = Number(result.lastInsertRowid);
     const insertItem = this.db.prepare(
@@ -127,20 +127,60 @@ export class KotDatabase {
     return this.getOrder(orderId);
   }
 
-  listOrders(scope: "active" | "history" | "all", department?: Department | null): Order[] {
-    let rows: Order[];
-    const base = "SELECT o.*, u.name as requestedByName FROM orders o LEFT JOIN users u ON o.requestedById = u.id";
+  listOrders(scope: "active" | "history" | "all", department?: Department | null, limit = 50): Order[] {
+    // Single JOIN query — avoids N+1 (one query per order for items)
+    const base = `
+      SELECT o.id, o.ticketNumber, o.customerName, o.customerPhone, o.orderType,
+             o.deliveryAddress, o.requestedTime, o.status, o.kitchenStatus, o.counterStatus,
+             o.requestedById, o.createdAt, o.updatedAt, u.name as requestedByName,
+             oi.id as oi_id, oi.productId as oi_productId, oi.name as oi_name,
+             oi.kg as oi_kg, oi.quantity as oi_quantity, oi.notes as oi_notes,
+             oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.department as oi_dept
+      FROM orders o
+      LEFT JOIN users u ON o.requestedById = u.id
+      LEFT JOIN order_items oi ON o.id = oi.orderId`;
+
+    let sql: string;
     if (scope === "active") {
-      rows = this.db.prepare(`${base} WHERE o.status IN ('New','Received','Ready') ORDER BY o.createdAt ASC`).all() as Order[];
+      sql = `${base} WHERE o.status IN ('New','Received','Ready') ORDER BY o.createdAt ASC`;
     } else if (scope === "history") {
-      rows = this.db.prepare(`${base} WHERE o.status = 'Done' ORDER BY o.updatedAt DESC LIMIT 200`).all() as Order[];
+      sql = `${base} WHERE o.status = 'Done' ORDER BY o.updatedAt DESC LIMIT ${limit * 20}`; // over-fetch rows, group into orders
     } else {
-      rows = this.db.prepare(`${base} ORDER BY o.createdAt DESC LIMIT 300`).all() as Order[];
+      sql = `${base} ORDER BY o.createdAt DESC LIMIT ${limit * 20}`;
     }
+
+    const allRows = this.db.prepare(sql).all() as Record<string, unknown>[];
+    const orderMap = new Map<number, Order>();
+
+    for (const row of allRows) {
+      const id = row.id as number;
+      if (!orderMap.has(id)) {
+        const order = this.parseOrder(row as Order & { deliveryAddress: string });
+        order.items = [];
+        orderMap.set(id, order);
+        if (orderMap.size >= limit && scope !== "active") break; // stop after enough distinct orders
+      }
+      if (row.oi_id != null) {
+        orderMap.get(id)!.items.push({
+          id: row.oi_id as number,
+          orderId: id,
+          productId: row.oi_productId as number | null,
+          name: row.oi_name as string,
+          kg: row.oi_kg as number | null,
+          quantity: row.oi_quantity as number | null,
+          notes: row.oi_notes as string,
+          unitPrice: row.oi_unitPrice as number | null,
+          lineTotal: row.oi_lineTotal as number | null,
+          department: row.oi_dept as Department,
+        });
+      }
+    }
+
+    let orders = Array.from(orderMap.values());
     if (department) {
-      rows = rows.filter((o) => (department === "kitchen" ? o.kitchenStatus : o.counterStatus) !== "n/a");
+      orders = orders.filter((o) => (department === "kitchen" ? o.kitchenStatus : o.counterStatus) !== "n/a");
     }
-    return rows.map((o) => ({ ...this.parseOrder(o), items: this.listOrderItems(o.id) }));
+    return orders;
   }
 
   getOrder(id: number): Order {
@@ -157,9 +197,13 @@ export class KotDatabase {
   }
 
   updateDeptStatus(id: number, department: Department, status: DeptStatus): Order {
-    const col = department === "kitchen" ? "kitchenStatus" : "counterStatus";
+    if (department !== "kitchen" && department !== "counter") throw new Error("Invalid department");
     const now = new Date().toISOString();
-    this.db.prepare(`UPDATE orders SET ${col} = ?, updatedAt = ? WHERE id = ?`).run(status, now, id);
+    if (department === "kitchen") {
+      this.db.prepare("UPDATE orders SET kitchenStatus = ?, updatedAt = ? WHERE id = ?").run(status, now, id);
+    } else {
+      this.db.prepare("UPDATE orders SET counterStatus = ?, updatedAt = ? WHERE id = ?").run(status, now, id);
+    }
 
     // Resolve overall status from both department statuses
     const row = this.db.prepare("SELECT kitchenStatus, counterStatus FROM orders WHERE id = ?").get(id) as { kitchenStatus: string; counterStatus: string };
@@ -278,6 +322,11 @@ export class KotDatabase {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+
+      CREATE INDEX IF NOT EXISTS idx_oi_orderId    ON order_items(orderId);
+      CREATE INDEX IF NOT EXISTS idx_ord_status    ON orders(status);
+      CREATE INDEX IF NOT EXISTS idx_ord_updatedAt ON orders(updatedAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_usr_name      ON users(name COLLATE NOCASE);
     `);
 
     // Seed default settings

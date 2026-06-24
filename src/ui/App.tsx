@@ -116,25 +116,37 @@ function MainApp({ currentUser, onLogout }: { currentUser: User; onLogout: () =>
   const [message, setMessage] = useState("");
   const [autoPrint, setAutoPrint] = useState(false);
 
+  // Full refresh — products + orders. Only on mount and after mutations.
   const refresh = async () => {
-    const [productList, activeList, doneList] = await Promise.all([
+    const [productList, activeList] = await Promise.all([
       api.products.list(),
       api.orders.list("active"),
-      api.orders.list("history")
     ]);
     setProducts(productList);
     setActiveOrders(activeList);
-    setHistoryOrders(doneList);
+  };
+
+  // Lightweight poll — only active orders every 5s (products & history excluded)
+  const pollActive = async () => {
+    const activeList = await api.orders.list("active");
+    setActiveOrders(activeList);
   };
 
   useEffect(() => {
     api.settings.get().then((s) => setAutoPrint(s.autoPrint === "true")).catch(() => undefined);
   }, []);
 
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => { void refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch history only when the user actually opens the history tab
+  useEffect(() => {
+    if (tab === "history") {
+      api.orders.list("history").then(setHistoryOrders).catch(() => undefined);
+    }
+  }, [tab]);
 
   useEffect(() => {
-    const id = setInterval(() => void refresh(), 5000);
+    const id = setInterval(() => void pollActive(), 5000);
     return () => clearInterval(id);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

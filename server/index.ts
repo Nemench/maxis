@@ -1,7 +1,12 @@
 import express from "express";
 import cors from "cors";
+import compression from "compression";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
+  console.warn("[MAXIS] Warning: JWT_SECRET not set — using default secret. Set JWT_SECRET in your environment for security.");
+}
 import { KotDatabase } from "./database.js";
 import authRouter from "./routes/auth.js";
 import usersRouter from "./routes/users.js";
@@ -16,6 +21,8 @@ const isProd = process.env.NODE_ENV === "production";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
+
+app.use(compression());
 
 if (!isProd) {
   // Dev: Vite runs separately on 5173, allow its origin
