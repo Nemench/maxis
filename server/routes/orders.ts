@@ -35,7 +35,9 @@ router.post("/", (req: AuthRequest, res) => {
 });
 
 router.get("/:id", (req, res) => {
-  try { res.json(db.getOrder(Number(req.params.id))); }
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(404).json({ message: "Not found" }); return; }
+  try { res.json(db.getOrder(id)); }
   catch (err) { res.status(404).json({ message: err instanceof Error ? err.message : "Not found" }); }
 });
 
