@@ -20,8 +20,9 @@ app.whenReady().then(async () => {
   process.env.NODE_ENV = "production";
   process.env.PORT = String(PORT);
 
-  // Start the Express server (executes server-dist/index.cjs)
-  await import("../server-dist/index.cjs");
+  // Start the Express server — variable path so bundler doesn't try to resolve it
+  const serverEntry = path.join(__dirname, "../server-dist/index.cjs");
+  await import(serverEntry);
 
   // Build tray icon
   const iconPath = app.isPackaged
