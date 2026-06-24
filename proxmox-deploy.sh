@@ -67,6 +67,7 @@ pct create "$CTID" "$TEMPLATE_PATH" \
   --cores "$CORES" \
   --rootfs "${STORAGE}:${DISK}" \
   --net0 "name=eth0,bridge=${BRIDGE},ip=dhcp" \
+  --nameserver "8.8.8.8 8.8.4.4" \
   --unprivileged 1 \
   --features nesting=1 \
   --start 1
