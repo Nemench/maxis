@@ -23,7 +23,7 @@ Default login after a fresh install: **Admin / 0000**
 Create a fresh **Debian 12 or Ubuntu 22.04 LXC** on Proxmox, then inside it run:
 
 ```bash
-bash <(curl -sSL https://raw.githubusercontent.com/YOUR_USERNAME/maxis/main/install.sh)
+bash <(curl -sSL https://raw.githubusercontent.com/Nemench/maxis/main/install.sh)
 ```
 
 That's it. The script installs Node.js 20, clones the repo, builds the app, and sets up a systemd service that starts automatically on boot.
@@ -47,7 +47,7 @@ journalctl -u maxis -f    # live logs
 ## Option 2 — Docker Compose
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/maxis.git
+git clone https://github.com/Nemench/maxis.git
 cd maxis
 docker compose up -d
 ```
