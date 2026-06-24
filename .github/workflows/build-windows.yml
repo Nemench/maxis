@@ -18,11 +18,28 @@ jobs:
           node-version: "20"
           cache: "npm"
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Configure node-gyp
+        run: |
+          npm config set msvs_version 2022
+          npm config set python python3
+        shell: cmd
+
       - name: Install dependencies
         run: npm install
 
+      - name: Manually rebuild better-sqlite3 for Electron
+        run: npx electron-rebuild --force --module-dir node_modules/better-sqlite3
+        env:
+          npm_config_msvs_version: "2022"
+
       - name: Build Windows installer
         run: npm run build:win
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: Upload installer as artifact
         uses: actions/upload-artifact@v4

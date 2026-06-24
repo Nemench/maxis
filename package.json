@@ -51,6 +51,7 @@
   "build": {
     "appId": "com.nemench.maxis",
     "productName": "MAXIS KOT",
+    "npmRebuild": false,
     "files": [
       "electron-dist/**",
       "server-dist/**",
