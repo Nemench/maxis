@@ -868,6 +868,13 @@ function ReportsPanel() {
 
 // ── Print ─────────────────────────────────────────────────────────────────────
 
+function fmtReceiptTime(rt: string): string {
+  if (!rt) return "";
+  const d = new Date(rt);
+  if (isNaN(d.getTime())) return rt;
+  return d.toLocaleString(appSettings.locale, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
 function printReceipt(order: Order, type: "kitchen" | "counter" | "master") {
   const items = type === "master" ? order.items : order.items.filter((i) => i.department === type);
   if (items.length === 0) return;
@@ -946,7 +953,7 @@ function printReceipt(order: Order, type: "kitchen" | "counter" | "master") {
       <div class="addr">${order.deliveryAddress.area}</div>
       ${order.deliveryAddress.buildingType === "building" && order.deliveryAddress.apartment ? `<div class="addr">Apt: ${order.deliveryAddress.apartment}</div>` : ""}
     ` : ""}
-    ${order.requestedTime ? `<div class="time-tag">${order.orderType === "delivery" ? "Deliver at" : "Pickup at"}: ${order.requestedTime}</div>` : ""}
+    ${order.requestedTime ? `<div class="time-tag">${order.orderType === "delivery" ? "Deliver at" : "Pickup at"}: ${fmtReceiptTime(order.requestedTime)}</div>` : ""}
     ${order.requestedByName ? `<div class="served-by">Served by: ${order.requestedByName}</div>` : ""}
   </div>
   <hr class="sep">
@@ -987,8 +994,29 @@ function urgencyTier(requestedTime: string): number {
   return 4;                       // 7+ days away
 }
 
-function urgencyInfo(requestedTime: string) {
-  return URGENCY[urgencyTier(requestedTime)];
+function urgencyInfo(requestedTime: string): { label: string; color: string } {
+  const tier = urgencyTier(requestedTime);
+  const { color } = URGENCY[tier];
+  if (!requestedTime) return { label: "", color };
+  const requested = new Date(requestedTime);
+  if (isNaN(requested.getTime())) return { label: "", color };
+
+  const diffMin = Math.floor((requested.getTime() - Date.now()) / 60_000);
+
+  if (diffMin < 0) return { label: "Overdue", color: "#c41f1f" };
+  if (diffMin < 60) return { label: `${diffMin}m`, color };
+  if (diffMin < 240) {
+    const h = Math.floor(diffMin / 60);
+    const m = diffMin % 60;
+    return { label: m > 0 ? `${h}h ${m}m` : `${h}h`, color };
+  }
+  if (tier <= 2) {
+    return { label: requested.toLocaleTimeString(appSettings.locale, { hour: "2-digit", minute: "2-digit" }), color };
+  }
+  return {
+    label: requested.toLocaleDateString(appSettings.locale, { weekday: "short", day: "numeric", month: "short" }),
+    color,
+  };
 }
 
 function sortByUrgency(orders: Order[]): Order[] {
