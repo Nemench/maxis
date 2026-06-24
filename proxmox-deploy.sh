@@ -92,7 +92,7 @@ pct exec "$CTID" -- bash -c "rm -f /etc/resolv.conf && printf 'nameserver 8.8.8.
 # ── Add default route (Proxmox unprivileged LXC gives /32 DHCP with no gateway) ──
 GATEWAY=$(ip route show default | awk '/default/ {print $3}' | head -1)
 [ -n "$GATEWAY" ] || error "Could not detect host gateway. Check Proxmox network config."
-pct exec "$CTID" -- bash -c "ip route show default | grep -q default || ip route add default via $GATEWAY dev eth0"
+pct exec "$CTID" -- bash -c "ip route show default | grep -q default || ip route add default via $GATEWAY dev eth0 onlink"
 ok "Default route via $GATEWAY"
 
 # ── Verify internet reachability ──────────────────────────────────────────────
