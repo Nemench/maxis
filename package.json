@@ -64,7 +64,10 @@
       "node_modules/file-uri-to-path/**"
     ],
     "extraResources": [
-      { "from": "public/logo.jpg", "to": "logo.jpg" }
+      {
+        "from": "public/logo.jpg",
+        "to": "logo.jpg"
+      }
     ],
     "win": {
       "target": "nsis",
@@ -80,5 +83,11 @@
       "output": "release",
       "buildResources": "public"
     }
+  },
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "esbuild@0.27.7": true,
+    "esbuild@0.28.1": true,
+    "better-sqlite3@9.6.0": true
   }
 }
