@@ -50,6 +50,9 @@ export class KotDatabase {
   }
 
   createUser(input: UserInput): User {
+    if (!input.pin || input.pin.length < 4 || input.pin.length > 8 || !/^\d+$/.test(input.pin)) {
+      throw new Error("PIN must be 4–8 digits");
+    }
     const hash = bcrypt.hashSync(input.pin, 10);
     const now = new Date().toISOString();
     const result = this.db
@@ -67,6 +70,7 @@ export class KotDatabase {
     }
     const now = new Date().toISOString();
     if (input.pin) {
+      if (!/^\d{4,8}$/.test(input.pin)) throw new Error("PIN must be 4–8 digits");
       this.db.prepare("UPDATE users SET pin = ?, updatedAt = ? WHERE id = ?").run(bcrypt.hashSync(input.pin, 10), now, id);
     }
     if (input.name !== undefined) {

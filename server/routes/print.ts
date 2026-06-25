@@ -15,6 +15,12 @@ router.post("/", (req, res) => {
     return;
   }
 
+  // Only allow characters valid in a CUPS printer name — prevents shell injection
+  if (!/^[\w.@-]+$/.test(printerName)) {
+    res.status(400).json({ message: "Invalid printer name" });
+    return;
+  }
+
   const tmpFile = join(tmpdir(), `maxis-${Date.now()}.html`);
   try {
     writeFileSync(tmpFile, html, "utf8");

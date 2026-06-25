@@ -9,13 +9,15 @@ router.use(requireAuth);
 
 router.get("/", (req: AuthRequest, res) => {
   if (req.user?.id) db.touchLastSeen(req.user.id);
-  const scope = (req.query.scope as string) || "active";
+  const rawScope = req.query.scope as string;
+  const scope: "active" | "history" | "all" =
+    rawScope === "history" ? "history" : rawScope === "all" ? "all" : "active";
   const role = req.user?.role;
   const dept: Department | null =
     role === "kitchen" ? "kitchen" :
     role === "counter" ? "counter" :
     null;
-  res.json(db.listOrders(scope as "active" | "history" | "all", dept));
+  res.json(db.listOrders(scope, dept));
 });
 
 router.post("/", (req: AuthRequest, res) => {

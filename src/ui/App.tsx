@@ -577,8 +577,8 @@ function TicketCard({ order, currentUser, onChanged, printStyle, printerMap }: {
       <footer>
         {showTotal && total > 0 && <span className="total">{currency.format(total)}</span>}
         <div className="ticket-actions">
-          {hasKitchen && <button className="icon-button secondary" onClick={() => void printReceipt(order, "kitchen", printStyle, printerMap.kitchen ?? "")} title="Print kitchen receipt">K</button>}
-          {hasCounter && <button className="icon-button secondary" onClick={() => void printReceipt(order, "counter", printStyle, printerMap.counter ?? "")} title="Print counter receipt">C</button>}
+          {hasKitchen && <button className="secondary sm" onClick={() => void printReceipt(order, "kitchen", printStyle, printerMap.kitchen ?? "")} title="Print kitchen receipt">Kitchen</button>}
+          {hasCounter && <button className="secondary sm" onClick={() => void printReceipt(order, "counter", printStyle, printerMap.counter ?? "")} title="Print counter receipt">Counter</button>}
           <button className="icon-button" onClick={() => void printReceipt(order, "master", printStyle, printerMap.master ?? "")} title="Print master receipt"><Printer size={18} /></button>
           {isMasterCashier && order.status !== "Done" && (
             <>
@@ -675,7 +675,11 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
     await onChanged().catch(() => undefined);
   };
 
-  const remove = async (id: number) => { await api.products.delete(id); await onChanged(); };
+  const remove = async (id: number, name: string) => {
+    if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
+    await api.products.delete(id);
+    await onChanged();
+  };
 
   return (
     <div className="products-layout">
@@ -719,7 +723,7 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
                 <td>{p.prepNotes}</td>
                 <td className="row-actions">
                   <button type="button" className="secondary" onClick={() => setEditing(p)}>Edit</button>
-                  <button type="button" className="icon-button danger" onClick={() => void remove(p.id)} title="Delete"><Trash2 size={18} /></button>
+                  <button type="button" className="icon-button danger" onClick={() => void remove(p.id, p.name)} title="Delete"><Trash2 size={18} /></button>
                 </td>
               </tr>
             ))}
