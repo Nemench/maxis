@@ -965,26 +965,28 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
 
       <section className="settings-section">
         <div className="settings-section-header">
-          <h3>Printer assignments</h3>
+          <span>Printer assignments</span>
           <button type="button" className="secondary sm" onClick={() => void fetchPrinters()} disabled={loadingPrinters}>
-            {loadingPrinters ? "Loading…" : "Refresh printers"}
+            {loadingPrinters ? "Loading…" : "Refresh"}
           </button>
         </div>
-        <p className="settings-hint">Assign each receipt type to a CUPS printer on the server. Leave blank to use the browser print dialog.</p>
-        <div className="printer-assignments">
-          {([ ["Kitchen receipt", "kitchenPrinter", "kitchen"], ["Counter receipt", "counterPrinter", "counter"], ["Master receipt", "masterPrinter", "master"] ] as [string, string, string][]).map(([label, key, mapKey]) => (
-            <label key={key}>
-              {label}
-              <select value={printerMap[mapKey] ?? ""} onChange={(e) => void changePrinter(key, e.target.value)}>
-                <option value="">— Browser dialog —</option>
-                {availablePrinters.map((p) => <option key={p} value={p}>{p}</option>)}
-              </select>
-            </label>
-          ))}
+        <div className="printer-body">
+          <p className="settings-hint">Assign each receipt type to a CUPS printer on the server. Leave blank to use the browser print dialog.</p>
+          <div className="printer-assignments">
+            {([ ["Kitchen receipt", "kitchenPrinter", "kitchen"], ["Counter receipt", "counterPrinter", "counter"], ["Master receipt", "masterPrinter", "master"] ] as [string, string, string][]).map(([label, key, mapKey]) => (
+              <label key={key}>
+                {label}
+                <select value={printerMap[mapKey] ?? ""} onChange={(e) => void changePrinter(key, e.target.value)}>
+                  <option value="">— Browser dialog —</option>
+                  {availablePrinters.map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </label>
+            ))}
+          </div>
+          {availablePrinters.length === 0 && !loadingPrinters && (
+            <p className="settings-hint">No printers found on this machine via CUPS.</p>
+          )}
         </div>
-        {availablePrinters.length === 0 && !loadingPrinters && (
-          <p className="settings-hint">No printers found. Make sure CUPS is running and printers are configured on this machine.</p>
-        )}
       </section>
 
       <section className="settings-section">
@@ -992,7 +994,7 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
         <div className="setting-row">
           <div className="setting-info">
             <strong>Import from CSV</strong>
-            <p>Columns: <code>name</code> (required), <code>category</code>, <code>unitDefault</code>, <code>pricePerUnit</code>, <code>prepNotes</code>, <code>department</code>. Existing products with the same name are updated.</p>
+            <p>CSV must have a <code>name</code> column. Optional: category, unitDefault, pricePerUnit, prepNotes, department. Existing products are updated by name.</p>
           </div>
           <div className="setting-actions">
             <input ref={csvInputRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={(e) => void handleImport(e)} />

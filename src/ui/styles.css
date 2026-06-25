@@ -816,87 +816,63 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover {
 
 /* ── Settings panel ── */
 .settings-panel {
-  max-width: 640px;
+  max-width: 600px;
 }
 
-.settings-panel h2 {
-  margin-bottom: 24px;
-  font-size: 20px;
+.settings-panel > h2 {
+  font-size: 18px;
   font-weight: 700;
   color: var(--blue-dark);
+  margin-bottom: 20px;
 }
 
 .settings-section {
-  margin-bottom: 28px;
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border);
   border-radius: 10px;
   overflow: hidden;
+  margin-bottom: 20px;
 }
 
-.settings-section h3 {
-  font-size: 13px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-  background: var(--blue-light);
-  padding: 8px 16px;
-  margin: 0;
-  border-bottom: 1px solid var(--border);
-}
-
+/* Section title bar — used both standalone (h3) and with a button (div) */
+.settings-section > h3,
 .settings-section-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   background: var(--blue-light);
   border-bottom: 1px solid var(--border);
-  padding: 8px 16px;
-}
-
-.settings-section-header h3 {
-  border: none;
-  background: none;
-  padding: 0;
+  padding: 7px 14px;
   margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
 }
 
+/* rows inside a section */
 .setting-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
+  gap: 20px;
   padding: 14px 16px;
-  border-top: 1px solid var(--border);
 }
 
-.setting-row:first-of-type {
-  border-top: none;
+.setting-row + .setting-row {
+  border-top: 1px solid var(--border);
 }
 
 .setting-info strong {
   display: block;
-  margin-bottom: 3px;
   font-size: 14px;
+  margin-bottom: 2px;
 }
 
 .setting-info p {
   font-size: 13px;
   color: var(--muted);
   margin: 0;
-  max-width: 380px;
-}
-
-.settings-hint {
-  font-size: 12px;
-  color: var(--muted);
-  margin: 0;
-  padding: 8px 16px 12px;
-}
-
-.settings-select {
-  min-width: 220px;
-  flex-shrink: 0;
 }
 
 .setting-actions {
@@ -905,23 +881,49 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover {
   flex-shrink: 0;
 }
 
+.settings-select {
+  min-width: 200px;
+  flex-shrink: 0;
+}
+
+/* printer assignments grid — sits directly in a section, needs its own padding */
+.printer-body {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0;
+}
+
 button.toggle-on {
-  min-width: 60px;
+  min-width: 58px;
   background: #22c55e;
-  border-color: #16a34a;
   color: #fff;
 }
 
+button.toggle-on:hover:not(:disabled) {
+  background: #16a34a;
+}
+
 button.toggle-off {
-  min-width: 60px;
-  background: var(--surface);
-  border-color: var(--border);
-  color: var(--muted);
+  min-width: 58px;
+  background: #e5e7eb;
+  color: #6b7280;
+}
+
+button.toggle-off:hover:not(:disabled) {
+  background: #d1d5db;
 }
 
 button.sm {
   font-size: 12px;
-  padding: 5px 10px;
+  min-height: 32px;
+  padding: 0 12px;
 }
 
 /* ── Reports panel ── */
