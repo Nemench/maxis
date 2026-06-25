@@ -412,15 +412,15 @@ function ProductCombobox({ products, value, onSelect }: { products: Product[]; v
 function Queue({ orders, currentUser, onChanged }: { orders: Order[]; currentUser: User; onChanged: () => Promise<void> }) {
   const [search, setSearch] = useState("");
   const sorted = useMemo(() => sortByUrgency(orders), [orders]);
-  const filtered = useMemo(() => {
+  const displayed = useMemo(() => {
     if (!search.trim()) return sorted;
     const q = search.toLowerCase();
-    return sorted.filter((o) =>
+    const hits = (o: Order) =>
       o.customerName.toLowerCase().includes(q) ||
       o.customerPhone.includes(q) ||
       o.ticketNumber.toLowerCase().includes(q) ||
-      o.items.some((i) => i.name.toLowerCase().includes(q))
-    );
+      o.items.some((i) => i.name.toLowerCase().includes(q));
+    return [...sorted.filter(hits), ...sorted.filter((o) => !hits(o))];
   }, [sorted, search]);
 
   return (
@@ -429,9 +429,9 @@ function Queue({ orders, currentUser, onChanged }: { orders: Order[]; currentUse
         <input placeholder="Search by name, phone, ticket or item…" value={search} onChange={(e) => setSearch(e.target.value)} />
         {search && <button type="button" className="search-clear" onClick={() => setSearch("")}>×</button>}
       </div>
-      {filtered.length === 0
-        ? <EmptyState title={search ? "No matching tickets" : "No active tickets"} detail={search ? "Try a different search." : "New orders will appear here."} />
-        : <div className="ticket-grid">{filtered.map((order) => <TicketCard key={order.id} order={order} currentUser={currentUser} onChanged={onChanged} />)}</div>
+      {displayed.length === 0
+        ? <EmptyState title="No active tickets" detail="New orders will appear here." />
+        : <div className="ticket-grid">{displayed.map((order) => <TicketCard key={order.id} order={order} currentUser={currentUser} onChanged={onChanged} />)}</div>
       }
     </>
   );
@@ -566,16 +566,16 @@ function TicketCard({ order, currentUser, onChanged }: { order: Order; currentUs
 
 function HistoryView({ orders }: { orders: Order[] }) {
   const [search, setSearch] = useState("");
-  const filtered = useMemo(() => {
+  const displayed = useMemo(() => {
     if (!search.trim()) return orders;
     const q = search.toLowerCase();
-    return orders.filter((o) =>
+    const hits = (o: Order) =>
       o.customerName.toLowerCase().includes(q) ||
       o.customerPhone.includes(q) ||
       o.ticketNumber.toLowerCase().includes(q) ||
       (o.requestedByName ?? "").toLowerCase().includes(q) ||
-      o.items.some((i) => i.name.toLowerCase().includes(q))
-    );
+      o.items.some((i) => i.name.toLowerCase().includes(q));
+    return [...orders.filter(hits), ...orders.filter((o) => !hits(o))];
   }, [orders, search]);
 
   if (orders.length === 0) return <EmptyState title="No completed orders yet" detail="Done tickets are kept here." />;
@@ -585,29 +585,26 @@ function HistoryView({ orders }: { orders: Order[] }) {
         <input placeholder="Search by name, phone, ticket, item or staff…" value={search} onChange={(e) => setSearch(e.target.value)} />
         {search && <button type="button" className="search-clear" onClick={() => setSearch("")}>×</button>}
       </div>
-      {filtered.length === 0
-        ? <p style={{ color: "var(--muted)", padding: "12px 0" }}>No matching orders.</p>
-        : <table>
-            <thead>
-              <tr><th>Ticket</th><th>Customer</th><th>Phone</th><th>Requested by</th><th>Items</th><th>Completed</th><th></th></tr>
-            </thead>
-            <tbody>
-              {filtered.map((order) => (
-                <tr key={order.id}>
-                  <td>{order.ticketNumber}</td>
-                  <td>{order.customerName}</td>
-                  <td>{order.customerPhone}</td>
-                  <td>{order.requestedByName ?? "—"}</td>
-                  <td>{order.items.length}</td>
-                  <td>{new Date(order.updatedAt).toLocaleString(appSettings.locale)}</td>
-                  <td>
-                    <button className="icon-button" onClick={() => printReceipt(order, "master")} title="Print master receipt"><Printer size={18} /></button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-      }
+      <table>
+          <thead>
+            <tr><th>Ticket</th><th>Customer</th><th>Phone</th><th>Requested by</th><th>Items</th><th>Completed</th><th></th></tr>
+          </thead>
+          <tbody>
+            {displayed.map((order) => (
+              <tr key={order.id}>
+                <td>{order.ticketNumber}</td>
+                <td>{order.customerName}</td>
+                <td>{order.customerPhone}</td>
+                <td>{order.requestedByName ?? "—"}</td>
+                <td>{order.items.length}</td>
+                <td>{new Date(order.updatedAt).toLocaleString(appSettings.locale)}</td>
+                <td>
+                  <button className="icon-button" onClick={() => printReceipt(order, "master")} title="Print master receipt"><Printer size={18} /></button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
     </div>
   );
 }
