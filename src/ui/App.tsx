@@ -804,8 +804,7 @@ function UsersPanel() {
           Role
           <select value={form.role} onChange={(e) => {
             const role = e.target.value as UserInput["role"];
-            const department: Department | null = role === "kitchen" ? "kitchen" : role === "counter" ? "counter" : null;
-            setForm({ ...form, role, department });
+            setForm({ ...form, role, department: roleDept(role) });
           }}>
             <option value="cashier">Cashier</option>
             <option value="master_cashier">Master Cashier</option>
@@ -828,16 +827,16 @@ function UsersPanel() {
             {users.map((u) => {
               const online = !!u.lastSeenAt && Date.now() - new Date(u.lastSeenAt).getTime() < 2 * 60 * 1000;
               return (
-              <tr key={u.id} style={{ opacity: u.isActive ? 1 : 0.45 }}>
+              <tr key={u.id} className={u.isActive ? "" : "inactive-row"}>
                 <td>{u.name}</td>
-                <td style={{ textTransform: "capitalize" }}>{u.role.replace("_", " ")}</td>
+                <td className="role-text">{u.role.replace("_", " ")}</td>
                 <td>{u.isActive ? "Active" : "Inactive"}</td>
                 <td>
                   <span className={`online-dot ${online ? "online" : "offline"}`}
                     title={online ? "Online now" : u.lastSeenAt
                       ? `Last seen ${new Date(u.lastSeenAt).toLocaleTimeString(appSettings.locale, { hour: "2-digit", minute: "2-digit" })}`
                       : "Never logged in"} />
-                  {online ? <span style={{ color: "#16a34a", fontSize: 12, fontWeight: 700 }}>Online</span> : null}
+                  {online ? <span className="online-text">Online</span> : null}
                 </td>
                 <td className="row-actions">
                   <button type="button" className="secondary" onClick={() => startEdit(u)}>Edit</button>
@@ -1172,13 +1171,6 @@ function ReportsPanel() {
 
 // ── Print ─────────────────────────────────────────────────────────────────────
 
-function fmtReceiptTime(rt: string): string {
-  if (!rt) return "";
-  const d = new Date(rt);
-  if (isNaN(d.getTime())) return rt;
-  return d.toLocaleString(appSettings.locale, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-}
-
 function buildReceiptHtml(order: Order, type: "kitchen" | "counter" | "master", style: "thermal" | "a4"): string {
   const items = type === "master" ? order.items : order.items.filter((i) => i.department === type);
   const label = type === "kitchen" ? "Kitchen Order" : type === "counter" ? "Counter Order" : "Receipt";
@@ -1191,7 +1183,7 @@ function buildReceiptHtml(order: Order, type: "kitchen" | "counter" | "master", 
   const addrLines = order.orderType === "delivery" && order.deliveryAddress?.street
     ? [order.deliveryAddress.street, order.deliveryAddress.area, order.deliveryAddress.buildingType === "building" && order.deliveryAddress.apartment ? `Apt ${order.deliveryAddress.apartment}` : ""].filter(Boolean)
     : [];
-  const requestedAtLine = order.requestedTime ? `${order.orderType === "delivery" ? "Deliver at" : "Pickup at"}: ${fmtReceiptTime(order.requestedTime)}` : "";
+  const requestedAtLine = order.requestedTime ? `${order.orderType === "delivery" ? "Deliver at" : "Pickup at"}: ${formatRequestedTime(order.requestedTime)}` : "";
 
   if (style === "a4") {
     const rows = items.map((i) => `<tr>

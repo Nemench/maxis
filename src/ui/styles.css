@@ -993,6 +993,10 @@ button.sm {
 .online-dot.online  { background: #22c55e; box-shadow: 0 0 5px #22c55e99; }
 .online-dot.offline { background: #d1d5db; }
 
+.online-text { color: #16a34a; font-size: 12px; font-weight: 700; }
+.role-text { text-transform: capitalize; }
+.inactive-row { opacity: 0.45; }
+
 /* ── Assignee tag ── */
 .assignee-tag {
   font-size: 12px;

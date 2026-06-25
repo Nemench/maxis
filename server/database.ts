@@ -250,31 +250,7 @@ export class KotDatabase {
     }
 
     const allRows = this.db.prepare(sql).all() as Record<string, unknown>[];
-    const orderMap = new Map<number, Order>();
-
-    for (const row of allRows) {
-      const id = row.id as number;
-      if (!orderMap.has(id)) {
-        const order = this.parseOrder(row as Order & { deliveryAddress: string });
-        order.items = [];
-        orderMap.set(id, order);
-        if (orderMap.size >= limit && scope !== "active") break; // stop after enough distinct orders
-      }
-      if (row.oi_id != null) {
-        orderMap.get(id)!.items.push({
-          id: row.oi_id as number,
-          orderId: id,
-          productId: row.oi_productId as number | null,
-          name: row.oi_name as string,
-          kg: row.oi_kg as number | null,
-          quantity: row.oi_quantity as number | null,
-          notes: row.oi_notes as string,
-          unitPrice: row.oi_unitPrice as number | null,
-          lineTotal: row.oi_lineTotal as number | null,
-          department: row.oi_dept as Department,
-        });
-      }
-    }
+    const orderMap = this.buildOrderMap(allRows, scope !== "active" ? limit : undefined);
 
     let orders = Array.from(orderMap.values());
     if (department) {
@@ -298,33 +274,7 @@ export class KotDatabase {
       ORDER BY o.createdAt ASC
       LIMIT 100000`;
 
-    const allRows = this.db.prepare(sql).all(from, to) as Record<string, unknown>[];
-    const orderMap = new Map<number, Order>();
-
-    for (const row of allRows) {
-      const id = row.id as number;
-      if (!orderMap.has(id)) {
-        const order = this.parseOrder(row as Order & { deliveryAddress: string });
-        order.items = [];
-        orderMap.set(id, order);
-      }
-      if (row.oi_id != null) {
-        orderMap.get(id)!.items.push({
-          id: row.oi_id as number,
-          orderId: id,
-          productId: row.oi_productId as number | null,
-          name: row.oi_name as string,
-          kg: row.oi_kg as number | null,
-          quantity: row.oi_quantity as number | null,
-          notes: row.oi_notes as string,
-          unitPrice: row.oi_unitPrice as number | null,
-          lineTotal: row.oi_lineTotal as number | null,
-          department: row.oi_dept as Department,
-        });
-      }
-    }
-
-    return Array.from(orderMap.values());
+    return Array.from(this.buildOrderMap(this.db.prepare(sql).all(from, to) as Record<string, unknown>[]).values());
   }
 
   getOrder(id: number): Order {
@@ -362,6 +312,34 @@ export class KotDatabase {
   }
 
   // ── Private ────────────────────────────────────────────────────────────────
+
+  private buildOrderMap(rows: Record<string, unknown>[], limit?: number): Map<number, Order> {
+    const map = new Map<number, Order>();
+    for (const row of rows) {
+      const id = row.id as number;
+      if (!map.has(id)) {
+        if (limit !== undefined && map.size >= limit) break;
+        const order = this.parseOrder(row as Order & { deliveryAddress: string });
+        order.items = [];
+        map.set(id, order);
+      }
+      if (row.oi_id != null) {
+        map.get(id)!.items.push({
+          id: row.oi_id as number,
+          orderId: id,
+          productId: row.oi_productId as number | null,
+          name: row.oi_name as string,
+          kg: row.oi_kg as number | null,
+          quantity: row.oi_quantity as number | null,
+          notes: row.oi_notes as string,
+          unitPrice: row.oi_unitPrice as number | null,
+          lineTotal: row.oi_lineTotal as number | null,
+          department: row.oi_dept as Department,
+        });
+      }
+    }
+    return map;
+  }
 
   private parseOrder(raw: Order & { deliveryAddress: string }): Order {
     let deliveryAddress: DeliveryAddress = { street: "", area: "", buildingType: "", apartment: "" };
