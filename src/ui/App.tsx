@@ -486,8 +486,6 @@ function TicketCard({ order, currentUser, onChanged, printStyle, printerMap }: {
     currentUser.role === "counter" ? order.items.filter((i) => i.department === "counter") :
     order.items;
 
-  const total = visibleItems.reduce((sum, i) => sum + (i.lineTotal ?? 0), 0);
-  const showTotal = currentUser.role === "admin" || currentUser.role === "cashier" || currentUser.role === "master_cashier";
   const hasKitchen = order.kitchenStatus !== "n/a";
   const hasCounter = order.counterStatus !== "n/a";
   const isMasterCashier = currentUser.role === "master_cashier";
@@ -529,14 +527,13 @@ function TicketCard({ order, currentUser, onChanged, printStyle, printerMap }: {
           <span className="badge">{order.status}</span>
         </div>
       </header>
-      <div className="customer">
-        <div className="customer-top">
+
+      <div className="tc-customer">
+        <div className="tc-name-row">
           <b>{order.customerName}</b>
-          <div className="customer-meta">
-            <span>{order.customerPhone}</span>
-            <span className={`order-type-badge ${order.orderType}`}>{order.orderType === "delivery" ? "Delivery" : "Pickup"}</span>
-          </div>
+          <span className={`order-type-badge ${order.orderType}`}>{order.orderType === "delivery" ? "Delivery" : "Pickup"}</span>
         </div>
+        <span className="tc-phone">{order.customerPhone}</span>
         {order.orderType === "delivery" && order.deliveryAddress?.street && (
           <span className="delivery-address">
             {order.deliveryAddress.street}, {order.deliveryAddress.area}
@@ -548,22 +545,28 @@ function TicketCard({ order, currentUser, onChanged, printStyle, printerMap }: {
           <span className="requested-time">{order.orderType === "delivery" ? "Deliver at" : "Pickup at"} {formatRequestedTime(order.requestedTime)}</span>
         )}
       </div>
-      {order.requestedByName && <div className="requested-by">Requested by {order.requestedByName}</div>}
-      {order.assignedTo && <div className="assignee-tag">Assigned to: <b>{order.assignedTo}</b></div>}
 
-      <div className="dept-statuses">
-        {hasKitchen && <span className={`dept-badge kitchen ds-${order.kitchenStatus.toLowerCase()}`}>Kitchen: {order.kitchenStatus}</span>}
-        {hasCounter && <span className={`dept-badge counter ds-${order.counterStatus.toLowerCase()}`}>Counter: {order.counterStatus}</span>}
-      </div>
+      {(order.requestedByName || order.assignedTo) && (
+        <div className="tc-meta">
+          {order.requestedByName && <span>Served by <b>{order.requestedByName}</b></span>}
+          {order.requestedByName && order.assignedTo && <span className="tc-dot">·</span>}
+          {order.assignedTo && <span>Assigned: <b>{order.assignedTo}</b></span>}
+        </div>
+      )}
+
+      {(hasKitchen || hasCounter) && (
+        <div className="dept-statuses">
+          {hasKitchen && <span className={`dept-badge kitchen ds-${order.kitchenStatus.toLowerCase()}`}>Kitchen: {order.kitchenStatus}</span>}
+          {hasCounter && <span className={`dept-badge counter ds-${order.counterStatus.toLowerCase()}`}>Counter: {order.counterStatus}</span>}
+        </div>
+      )}
 
       <ul>
         {visibleItems.map((item) => (
           <li key={item.id}>
             <div>
               <b>{item.name}</b>
-              {(currentUser.role === "admin" || currentUser.role === "cashier" || currentUser.role === "master_cashier")
-                ? <span className={`item-dept ${item.department}`}>{item.department}</span>
-                : null}
+              {currentUser.role === "admin" && <span className={`item-dept ${item.department}`}>{item.department}</span>}
               {item.notes && <span>{item.notes}</span>}
             </div>
             <em>
@@ -575,7 +578,6 @@ function TicketCard({ order, currentUser, onChanged, printStyle, printerMap }: {
       </ul>
 
       <footer>
-        {showTotal && total > 0 && <span className="total">{currency.format(total)}</span>}
         <div className="ticket-actions">
           {hasKitchen && <button className="secondary sm" onClick={() => void printReceipt(order, "kitchen", printStyle, printerMap.kitchen ?? "")} title="Print kitchen receipt">Kitchen</button>}
           {hasCounter && <button className="secondary sm" onClick={() => void printReceipt(order, "counter", printStyle, printerMap.counter ?? "")} title="Print counter receipt">Counter</button>}
