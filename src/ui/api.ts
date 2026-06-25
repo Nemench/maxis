@@ -48,5 +48,10 @@ export const api = {
   settings: {
     get: () => req<Record<string, string>>("GET", "/settings"),
     set: (data: Record<string, string>) => req<Record<string, string>>("PUT", "/settings", data)
-  }
+  },
+  printers: {
+    list: () => req<string[]>("GET", "/printers")
+  },
+  print: (printerName: string, html: string) =>
+    req<{ ok: boolean }>("POST", "/print", { printerName, html })
 };

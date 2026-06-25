@@ -118,6 +118,7 @@ function MainApp({ currentUser, onLogout }: { currentUser: User; onLogout: () =>
   const [message, setMessage] = useState("");
   const [autoPrint, setAutoPrint] = useState(false);
   const [printStyle, setPrintStyle] = useState("thermal");
+  const [printerMap, setPrinterMap] = useState({ kitchen: "", counter: "", master: "" });
 
   // Full refresh — products + orders. Only on mount and after mutations.
   const refresh = async () => {
@@ -139,6 +140,7 @@ function MainApp({ currentUser, onLogout }: { currentUser: User; onLogout: () =>
     api.settings.get().then((s) => {
       setAutoPrint(s.autoPrint === "true");
       setPrintStyle(s.printStyle ?? "thermal");
+      setPrinterMap({ kitchen: s.kitchenPrinter ?? "", counter: s.counterPrinter ?? "", master: s.masterPrinter ?? "" });
     }).catch(() => undefined);
   }, []);
 
@@ -211,15 +213,16 @@ function MainApp({ currentUser, onLogout }: { currentUser: User; onLogout: () =>
             currentUser={currentUser}
             autoPrint={autoPrint}
             printStyle={printStyle}
+            printerMap={printerMap}
             onCreated={async (order) => { notify(`Created ${order.ticketNumber}`); await refresh(); setTab("queue"); }}
           />
         )}
-        {tab === "queue" && <Queue orders={activeOrders} currentUser={currentUser} onChanged={refresh} printStyle={printStyle} />}
-        {tab === "history" && <HistoryView orders={historyOrders} printStyle={printStyle} />}
+        {tab === "queue" && <Queue orders={activeOrders} currentUser={currentUser} onChanged={refresh} printStyle={printStyle} printerMap={printerMap} />}
+        {tab === "history" && <HistoryView orders={historyOrders} printStyle={printStyle} printerMap={printerMap} />}
         {tab === "products" && <Products products={products} onChanged={refresh} />}
         {tab === "users" && currentUser.role === "admin" && <UsersPanel />}
         {tab === "settings" && currentUser.role === "admin" && (
-          <SettingsPanel autoPrint={autoPrint} onAutoPrintChange={setAutoPrint} printStyle={printStyle} onPrintStyleChange={setPrintStyle} />
+          <SettingsPanel autoPrint={autoPrint} onAutoPrintChange={setAutoPrint} printStyle={printStyle} onPrintStyleChange={setPrintStyle} printerMap={printerMap} onPrinterMapChange={setPrinterMap} />
         )}
         {tab === "reports" && currentUser.role === "admin" && <ReportsPanel />}
       </main>
@@ -229,7 +232,7 @@ function MainApp({ currentUser, onLogout }: { currentUser: User; onLogout: () =>
 
 // ── Order entry ───────────────────────────────────────────────────────────────
 
-function OrderEntry({ products, currentUser, autoPrint, printStyle, onCreated }: { products: Product[]; currentUser: User; autoPrint: boolean; printStyle: string; onCreated: (order: Order) => void }) {
+function OrderEntry({ products, currentUser, autoPrint, printStyle, printerMap, onCreated }: { products: Product[]; currentUser: User; autoPrint: boolean; printStyle: string; printerMap: Record<string, string>; onCreated: (order: Order) => void }) {
   const defaultDept: Department = currentUser.department ?? "counter";
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
@@ -270,7 +273,7 @@ function OrderEntry({ products, currentUser, autoPrint, printStyle, onCreated }:
     setItems([{ ...emptyLine, department: defaultDept }]);
     onCreated(order);
     if (autoPrint && currentUser.role === "master_cashier") {
-      printReceipt(order, "master", printStyle);
+      void printReceipt(order, "master", printStyle, printerMap.master ?? "");
     }
   };
 
@@ -320,13 +323,11 @@ function OrderEntry({ products, currentUser, autoPrint, printStyle, onCreated }:
               Product
               <ProductCombobox
                 products={products}
-                value={String(item.productId ?? "")}
+                productId={String(item.productId ?? "")}
+                itemName={item.name}
                 onSelect={(id) => chooseProduct(index, id)}
+                onNameChange={(name) => setLine(index, { name })}
               />
-            </label>
-            <label>
-              Item
-              <input value={item.name} onChange={(e) => setLine(index, { name: e.target.value })} required />
             </label>
             <label>
               Kg
@@ -368,12 +369,19 @@ function OrderEntry({ products, currentUser, autoPrint, printStyle, onCreated }:
 
 // ── Product combobox ──────────────────────────────────────────────────────────
 
-function ProductCombobox({ products, value, onSelect }: { products: Product[]; value: string; onSelect: (id: string) => void }) {
+function ProductCombobox({ products, productId, itemName, onSelect, onNameChange }: {
+  products: Product[];
+  productId: string;
+  itemName: string;
+  onSelect: (id: string) => void;
+  onNameChange: (name: string) => void;
+}) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
-  const selected = products.find((p) => String(p.id) === value);
+  const isFreeText = !productId;
+  const selected = products.find((p) => String(p.id) === productId);
 
   useEffect(() => {
     if (!open) return;
@@ -392,26 +400,40 @@ function ProductCombobox({ products, value, onSelect }: { products: Product[]; v
 
   const pick = (id: string) => { onSelect(id); setQuery(""); setOpen(false); };
 
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setQuery(val);
+    setOpen(true);
+    if (isFreeText) onNameChange(val);
+  };
+
+  const handleFocus = () => {
+    if (isFreeText) setQuery(itemName);
+    setOpen(true);
+  };
+
+  const displayValue = open ? query : (selected?.name ?? itemName);
+
   return (
     <div className="combo-wrap" ref={wrapRef}>
       <input
-        value={open ? query : (selected?.name ?? "")}
-        placeholder="Search or free text…"
+        value={displayValue}
+        placeholder={isFreeText ? "Type item name or search products…" : "Search products…"}
         autoComplete="off"
-        onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
-        onFocus={() => setOpen(true)}
+        onChange={handleChange}
+        onFocus={handleFocus}
         onKeyDown={(e) => { if (e.key === "Escape") { setOpen(false); setQuery(""); } }}
       />
       {open && (
         <div className="combo-dropdown">
-          <div className="combo-option combo-free" onMouseDown={() => pick("")}>— Free text —</div>
+          {productId && <div className="combo-option combo-free" onMouseDown={() => pick("")}>— Clear / free text —</div>}
           {filtered.map((p) => (
-            <div key={p.id} className={`combo-option${String(p.id) === value ? " combo-selected" : ""}`} onMouseDown={() => pick(String(p.id))}>
+            <div key={p.id} className={`combo-option${String(p.id) === productId ? " combo-selected" : ""}`} onMouseDown={() => pick(String(p.id))}>
               <span>{p.name}</span>
               <small>{p.category} · {p.department}</small>
             </div>
           ))}
-          {filtered.length === 0 && <div className="combo-empty">No matches</div>}
+          {filtered.length === 0 && query && <div className="combo-empty">No matches — press Escape to stay as free text</div>}
         </div>
       )}
     </div>
@@ -420,7 +442,7 @@ function ProductCombobox({ products, value, onSelect }: { products: Product[]; v
 
 // ── Queue ─────────────────────────────────────────────────────────────────────
 
-function Queue({ orders, currentUser, onChanged, printStyle }: { orders: Order[]; currentUser: User; onChanged: () => Promise<void>; printStyle: string }) {
+function Queue({ orders, currentUser, onChanged, printStyle, printerMap }: { orders: Order[]; currentUser: User; onChanged: () => Promise<void>; printStyle: string; printerMap: Record<string, string> }) {
   const [search, setSearch] = useState("");
   const sorted = useMemo(() => sortByUrgency(orders), [orders]);
   const displayed = useMemo(() => {
@@ -442,7 +464,7 @@ function Queue({ orders, currentUser, onChanged, printStyle }: { orders: Order[]
       </div>
       {displayed.length === 0
         ? <EmptyState title="No active tickets" detail="New orders will appear here." />
-        : <div className="ticket-grid">{displayed.map((order) => <TicketCard key={order.id} order={order} currentUser={currentUser} onChanged={onChanged} printStyle={printStyle} />)}</div>
+        : <div className="ticket-grid">{displayed.map((order) => <TicketCard key={order.id} order={order} currentUser={currentUser} onChanged={onChanged} printStyle={printStyle} printerMap={printerMap} />)}</div>
       }
     </>
   );
@@ -450,7 +472,7 @@ function Queue({ orders, currentUser, onChanged, printStyle }: { orders: Order[]
 
 // ── Ticket card ───────────────────────────────────────────────────────────────
 
-function TicketCard({ order, currentUser, onChanged, printStyle }: { order: Order; currentUser: User; onChanged: () => Promise<void>; printStyle: string }) {
+function TicketCard({ order, currentUser, onChanged, printStyle, printerMap }: { order: Order; currentUser: User; onChanged: () => Promise<void>; printStyle: string; printerMap: Record<string, string> }) {
   const visibleItems =
     currentUser.role === "kitchen" ? order.items.filter((i) => i.department === "kitchen") :
     currentUser.role === "counter" ? order.items.filter((i) => i.department === "counter") :
@@ -547,9 +569,9 @@ function TicketCard({ order, currentUser, onChanged, printStyle }: { order: Orde
       <footer>
         {showTotal && total > 0 && <span className="total">{currency.format(total)}</span>}
         <div className="ticket-actions">
-          {hasKitchen && <button className="icon-button secondary" onClick={() => printReceipt(order, "kitchen", printStyle)} title="Print kitchen receipt">K</button>}
-          {hasCounter && <button className="icon-button secondary" onClick={() => printReceipt(order, "counter", printStyle)} title="Print counter receipt">C</button>}
-          <button className="icon-button" onClick={() => printReceipt(order, "master", printStyle)} title="Print master receipt"><Printer size={18} /></button>
+          {hasKitchen && <button className="icon-button secondary" onClick={() => void printReceipt(order, "kitchen", printStyle, printerMap.kitchen ?? "")} title="Print kitchen receipt">K</button>}
+          {hasCounter && <button className="icon-button secondary" onClick={() => void printReceipt(order, "counter", printStyle, printerMap.counter ?? "")} title="Print counter receipt">C</button>}
+          <button className="icon-button" onClick={() => void printReceipt(order, "master", printStyle, printerMap.master ?? "")} title="Print master receipt"><Printer size={18} /></button>
           {isMasterCashier && order.status !== "Done" && (
             <>
               {(order.kitchenStatus === "New" || order.counterStatus === "New") && (
@@ -576,7 +598,7 @@ function TicketCard({ order, currentUser, onChanged, printStyle }: { order: Orde
 
 // ── History ───────────────────────────────────────────────────────────────────
 
-function HistoryView({ orders, printStyle }: { orders: Order[]; printStyle: string }) {
+function HistoryView({ orders, printStyle, printerMap }: { orders: Order[]; printStyle: string; printerMap: Record<string, string> }) {
   const [search, setSearch] = useState("");
   const displayed = useMemo(() => {
     if (!search.trim()) return orders;
@@ -611,7 +633,7 @@ function HistoryView({ orders, printStyle }: { orders: Order[]; printStyle: stri
                 <td>{order.items.length}</td>
                 <td>{new Date(order.updatedAt).toLocaleString(appSettings.locale)}</td>
                 <td>
-                  <button className="icon-button" onClick={() => printReceipt(order, "master", printStyle)} title="Print master receipt"><Printer size={18} /></button>
+                  <button className="icon-button" onClick={() => void printReceipt(order, "master", printStyle, printerMap.master ?? "")} title="Print master receipt"><Printer size={18} /></button>
                 </td>
               </tr>
             ))}
@@ -827,8 +849,19 @@ function UsersPanel() {
 
 // ── Settings (admin) ──────────────────────────────────────────────────────────
 
-function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleChange }: { autoPrint: boolean; onAutoPrintChange: (v: boolean) => void; printStyle: string; onPrintStyleChange: (v: string) => void }) {
+function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleChange, printerMap, onPrinterMapChange }: { autoPrint: boolean; onAutoPrintChange: (v: boolean) => void; printStyle: string; onPrintStyleChange: (v: string) => void; printerMap: Record<string, string>; onPrinterMapChange: (v: Record<string, string>) => void }) {
   const [msg, setMsg] = useState("");
+  const [availablePrinters, setAvailablePrinters] = useState<string[]>([]);
+  const [loadingPrinters, setLoadingPrinters] = useState(false);
+
+  const fetchPrinters = async () => {
+    setLoadingPrinters(true);
+    try { setAvailablePrinters(await api.printers.list()); }
+    catch { /* ignore */ }
+    finally { setLoadingPrinters(false); }
+  };
+
+  useEffect(() => { void fetchPrinters(); }, []);
 
   const toggle = async () => {
     const next = !autoPrint;
@@ -842,6 +875,13 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
     await api.settings.set({ printStyle: style });
     onPrintStyleChange(style);
     setMsg("Receipt format updated");
+    window.setTimeout(() => setMsg(""), 2500);
+  };
+
+  const changePrinter = async (key: string, value: string) => {
+    await api.settings.set({ [key]: value });
+    onPrinterMapChange({ ...printerMap, [key.replace("Printer", "")]: value });
+    setMsg("Printer assignment saved");
     window.setTimeout(() => setMsg(""), 2500);
   };
 
@@ -868,6 +908,31 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
           <option value="master_a4">Master receipt A4 · dept receipts thermal</option>
           <option value="dept_a4">Master receipt thermal · dept receipts A4</option>
         </select>
+      </div>
+      <div className="setting-row" style={{ alignItems: "flex-start", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+          <div className="setting-info">
+            <strong>Printer assignments</strong>
+            <p>Assign each receipt type to a printer on the server. Printers must be connected to or accessible from the server machine via CUPS. Leave blank to use the browser print dialog.</p>
+          </div>
+          <button type="button" className="secondary" onClick={() => void fetchPrinters()} disabled={loadingPrinters}>
+            {loadingPrinters ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+        <div className="printer-assignments">
+          {([ ["Kitchen receipt", "kitchenPrinter", "kitchen"], ["Counter receipt", "counterPrinter", "counter"], ["Master receipt", "masterPrinter", "master"] ] as [string, string, string][]).map(([label, key, mapKey]) => (
+            <label key={key}>
+              {label}
+              <select value={printerMap[mapKey] ?? ""} onChange={(e) => void changePrinter(key, e.target.value)}>
+                <option value="">— Browser print dialog —</option>
+                {availablePrinters.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </label>
+          ))}
+        </div>
+        {availablePrinters.length === 0 && !loadingPrinters && (
+          <p style={{ fontSize: 12, color: "var(--muted)" }}>No printers found. Make sure CUPS is running and printers are configured on the server.</p>
+        )}
       </div>
       {msg && <div className="form-message">{msg}</div>}
     </div>
@@ -1017,7 +1082,7 @@ function fmtReceiptTime(rt: string): string {
   return d.toLocaleString(appSettings.locale, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-function printReceipt(order: Order, type: "kitchen" | "counter" | "master", printStyle = "thermal") {
+async function printReceipt(order: Order, type: "kitchen" | "counter" | "master", printStyle = "thermal", printerName = "") {
   const items = type === "master" ? order.items : order.items.filter((i) => i.department === type);
   if (items.length === 0) return;
 
@@ -1034,8 +1099,7 @@ function printReceipt(order: Order, type: "kitchen" | "counter" | "master", prin
   const timeStr = d.toLocaleTimeString(appSettings.locale, { hour: "2-digit", minute: "2-digit" });
   const logoUrl = `${window.location.origin}/logo.jpg`;
 
-  const win = window.open("", "_blank", resolved === "a4" ? "width=900,height=700" : "width=380,height=720");
-  if (!win) return;
+  let html: string;
 
   if (resolved === "a4") {
     const a4Rows = items.map((i) => `
@@ -1046,7 +1110,7 @@ function printReceipt(order: Order, type: "kitchen" | "counter" | "master", prin
         <td>${i.quantity ? `×${i.quantity}` : "—"}</td>
         ${showPrices ? `<td style="text-align:right;font-weight:700">${i.lineTotal != null ? `R${i.lineTotal.toFixed(2)}` : "—"}</td>` : ""}
       </tr>`).join("");
-    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${label} — ${order.ticketNumber}</title><style>
+    html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${label} — ${order.ticketNumber}</title><style>
       @page{size:A4;margin:18mm}*{box-sizing:border-box;margin:0;padding:0}
       body{font-family:Inter,'Segoe UI',Arial,sans-serif;font-size:13px;color:#1a1a2e}
       .hdr{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:14px;border-bottom:3px solid #0d2b6b;margin-bottom:20px}
@@ -1085,14 +1149,14 @@ function printReceipt(order: Order, type: "kitchen" | "counter" | "master", prin
     ${showPrices && total > 0 ? `<div class="tot"><div class="tot-label">ORDER TOTAL</div><div class="tot-value">R${total.toFixed(2)}</div></div>` : ""}
     <div class="footer">Thank you for your order — MAXIS Discount Kosher Butchery</div>
     <script>window.onload=function(){window.print();window.onafterprint=function(){window.close();};}</script>
-    </body></html>`);
+    </body></html>`;
   } else {
     const thermalRows = items.map((i) => {
       const qty = [i.kg ? `${i.kg} kg` : "", i.quantity ? `×${i.quantity}` : ""].filter(Boolean).join("  ");
       const lineTotal = showPrices && i.lineTotal ? `R${i.lineTotal.toFixed(2)}` : "";
       return `<div class="item"><div class="item-name">${i.name}</div><div class="item-sub"><span>${qty}${i.notes ? `  ${i.notes}` : ""}</span>${lineTotal ? `<span class="amt">${lineTotal}</span>` : ""}</div></div>`;
     }).join("");
-    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${label} — ${order.ticketNumber}</title><style>
+    html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${label} — ${order.ticketNumber}</title><style>
       @page{size:80mm auto;margin:4mm}*{box-sizing:border-box;margin:0;padding:0}
       body{font-family:'Courier New',Courier,monospace;font-size:12px;width:72mm;margin:0 auto;line-height:1.5;color:#000}
       .center{text-align:center}.sep{border:none;border-top:1px dashed #999;margin:7px 0}.sep2{border:none;border-top:2px solid #000;margin:7px 0}
@@ -1132,9 +1196,21 @@ function printReceipt(order: Order, type: "kitchen" | "counter" | "master", prin
     <hr class="sep">
     <div class="center thank-you">Thank you for your order</div>
     <script>window.onload=function(){window.print();window.onafterprint=function(){window.close();};}</script>
-    </body></html>`);
+    </body></html>`;
   }
-  win.document.close();
+
+  if (printerName) {
+    try {
+      await api.print(printerName, html);
+    } catch {
+      // Fall back to browser dialog on server print failure
+      const win = window.open("", "_blank", resolved === "a4" ? "width=900,height=700" : "width=380,height=720");
+      if (win) { win.document.write(html); win.document.close(); }
+    }
+  } else {
+    const win = window.open("", "_blank", resolved === "a4" ? "width=900,height=700" : "width=380,height=720");
+    if (win) { win.document.write(html); win.document.close(); }
+  }
 }
 
 // ── Urgency helpers ───────────────────────────────────────────────────────────

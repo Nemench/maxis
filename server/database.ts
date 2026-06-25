@@ -385,6 +385,9 @@ export class KotDatabase {
     // Seed default settings
     this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('autoPrint', 'false')").run();
     this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('printStyle', 'thermal')").run();
+    this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('kitchenPrinter', '')").run();
+    this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('counterPrinter', '')").run();
+    this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('masterPrinter', '')").run();
   }
 
   // ── Settings ───────────────────────────────────────────────────────────────

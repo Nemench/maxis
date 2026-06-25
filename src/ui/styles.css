@@ -276,7 +276,7 @@ textarea {
 
 .line-row {
   display: grid;
-  grid-template-columns: 1.2fr 1.4fr 80px 80px 90px 1.5fr 40px;
+  grid-template-columns: 1.8fr 80px 80px 90px 1.5fr 40px;
   gap: 10px;
   align-items: end;
   padding: 12px;
@@ -554,7 +554,8 @@ th {
 
   .form-grid, .products-layout { grid-template-columns: 1fr; }
 
-  .line-row { grid-template-columns: 1fr 1fr; }
+  .line-row { grid-template-columns: 1fr 60px 60px; }
+  .printer-assignments { grid-template-columns: 1fr; }
 }
 
 /* ── Form message ── */
@@ -760,6 +761,15 @@ th {
   flex-direction: column;
   gap: 5px;
   margin-top: 4px;
+}
+
+/* ── Printer assignments ── */
+.printer-assignments {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  width: 100%;
+  padding-top: 4px;
 }
 
 .optional-hint {

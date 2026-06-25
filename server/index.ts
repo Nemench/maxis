@@ -11,6 +11,8 @@ import productsRouter from "./routes/products.js";
 import ordersRouter from "./routes/orders.js";
 import settingsRouter from "./routes/settings.js";
 import reportsRouter from "./routes/reports.js";
+import printersRouter from "./routes/printers.js";
+import printRouter from "./routes/print.js";
 
 export const db = new KotDatabase();
 db.initialize();
@@ -35,6 +37,8 @@ app.use("/api/products", productsRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/reports", reportsRouter);
+app.use("/api/printers", printersRouter);
+app.use("/api/print", printRouter);
 
 if (isProd) {
   // Serve built React app
