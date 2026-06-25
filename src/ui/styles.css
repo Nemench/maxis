@@ -578,20 +578,6 @@ th {
   font-weight: 600;
   margin-top: 8px;
 }
-a.button {
-  display: inline-flex;
-  align-items: center;
-  text-decoration: none;
-  padding: 8px 14px;
-  border-radius: 8px;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  border: 1.5px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-}
-
 /* ── Login ── */
 .login-screen {
   display: grid;
@@ -830,13 +816,49 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover {
 
 /* ── Settings panel ── */
 .settings-panel {
-  max-width: 540px;
+  max-width: 640px;
 }
 
 .settings-panel h2 {
-  margin-bottom: 20px;
-  font-size: 18px;
+  margin-bottom: 24px;
+  font-size: 20px;
+  font-weight: 700;
   color: var(--blue-dark);
+}
+
+.settings-section {
+  margin-bottom: 28px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.settings-section h3 {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--blue-light);
+  padding: 8px 16px;
+  margin: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--blue-light);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+}
+
+.settings-section-header h3 {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
 }
 
 .setting-row {
@@ -844,19 +866,62 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 16px 0;
+  padding: 14px 16px;
   border-top: 1px solid var(--border);
+}
+
+.setting-row:first-of-type {
+  border-top: none;
 }
 
 .setting-info strong {
   display: block;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
+  font-size: 14px;
 }
 
 .setting-info p {
   font-size: 13px;
   color: var(--muted);
   margin: 0;
+  max-width: 380px;
+}
+
+.settings-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0;
+  padding: 8px 16px 12px;
+}
+
+.settings-select {
+  min-width: 220px;
+  flex-shrink: 0;
+}
+
+.setting-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+button.toggle-on {
+  min-width: 60px;
+  background: #22c55e;
+  border-color: #16a34a;
+  color: #fff;
+}
+
+button.toggle-off {
+  min-width: 60px;
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+button.sm {
+  font-size: 12px;
+  padding: 5px 10px;
 }
 
 /* ── Reports panel ── */

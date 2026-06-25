@@ -936,79 +936,95 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
 
   return (
     <div className="panel settings-panel">
-      <h2>System Settings</h2>
-      <div className="setting-row">
-        <div className="setting-info">
-          <strong>Auto-print on Master Cashier order</strong>
-          <p>Automatically opens the print dialog when a Master Cashier creates a new order. Turn off during setup and testing.</p>
-        </div>
-        <button type="button" className={autoPrint ? "" : "secondary"} onClick={() => void toggle()}>
-          {autoPrint ? "On" : "Off"}
-        </button>
-      </div>
-      <div className="setting-row">
-        <div className="setting-info">
-          <strong>Receipt format</strong>
-          <p>Choose between 80mm thermal strips or full A4 pages. You can also mix: A4 for the master receipt and thermal for kitchen/counter, or vice versa.</p>
-        </div>
-        <select value={printStyle} style={{ width: 260 }} onChange={(e) => void changePrintStyle(e.target.value)}>
-          <option value="thermal">All receipts — thermal (80mm)</option>
-          <option value="a4">All receipts — A4</option>
-          <option value="master_a4">Master receipt A4 · dept receipts thermal</option>
-          <option value="dept_a4">Master receipt thermal · dept receipts A4</option>
-        </select>
-      </div>
-      <div className="setting-row" style={{ alignItems: "flex-start", flexDirection: "column", gap: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+      <h2>Settings</h2>
+
+      <section className="settings-section">
+        <h3>Printing</h3>
+        <div className="setting-row">
           <div className="setting-info">
-            <strong>Printer assignments</strong>
-            <p>Assign each receipt type to a printer on the server. Printers must be connected to or accessible from the server machine via CUPS. Leave blank to use the browser print dialog.</p>
+            <strong>Auto-print</strong>
+            <p>Automatically print the master receipt when a Master Cashier creates an order.</p>
           </div>
-          <button type="button" className="secondary" onClick={() => void fetchPrinters()} disabled={loadingPrinters}>
-            {loadingPrinters ? "Loading…" : "Refresh"}
+          <button type="button" className={autoPrint ? "toggle-on" : "toggle-off"} onClick={() => void toggle()}>
+            {autoPrint ? "On" : "Off"}
           </button>
         </div>
+        <div className="setting-row">
+          <div className="setting-info">
+            <strong>Receipt format</strong>
+            <p>80mm thermal for counter use; A4 for full-page printing. Mix modes available.</p>
+          </div>
+          <select className="settings-select" value={printStyle} onChange={(e) => void changePrintStyle(e.target.value)}>
+            <option value="thermal">All — thermal (80mm)</option>
+            <option value="a4">All — A4</option>
+            <option value="master_a4">Master A4 · dept thermal</option>
+            <option value="dept_a4">Master thermal · dept A4</option>
+          </select>
+        </div>
+      </section>
+
+      <section className="settings-section">
+        <div className="settings-section-header">
+          <h3>Printer assignments</h3>
+          <button type="button" className="secondary sm" onClick={() => void fetchPrinters()} disabled={loadingPrinters}>
+            {loadingPrinters ? "Loading…" : "Refresh printers"}
+          </button>
+        </div>
+        <p className="settings-hint">Assign each receipt type to a CUPS printer on the server. Leave blank to use the browser print dialog.</p>
         <div className="printer-assignments">
           {([ ["Kitchen receipt", "kitchenPrinter", "kitchen"], ["Counter receipt", "counterPrinter", "counter"], ["Master receipt", "masterPrinter", "master"] ] as [string, string, string][]).map(([label, key, mapKey]) => (
             <label key={key}>
               {label}
               <select value={printerMap[mapKey] ?? ""} onChange={(e) => void changePrinter(key, e.target.value)}>
-                <option value="">— Browser print dialog —</option>
+                <option value="">— Browser dialog —</option>
                 {availablePrinters.map((p) => <option key={p} value={p}>{p}</option>)}
               </select>
             </label>
           ))}
         </div>
         {availablePrinters.length === 0 && !loadingPrinters && (
-          <p style={{ fontSize: 12, color: "var(--muted)" }}>No printers found. Make sure CUPS is running and printers are configured on the server.</p>
+          <p className="settings-hint">No printers found. Make sure CUPS is running and printers are configured on this machine.</p>
         )}
-      </div>
-      <div className="setting-row">
-        <div className="setting-info">
-          <strong>Product import</strong>
-          <p>Upload a CSV file to bulk-import products. Required column: <code>name</code>. Optional columns: <code>category</code>, <code>unitDefault</code>, <code>pricePerUnit</code>, <code>prepNotes</code>, <code>department</code>. Existing products with the same name are updated.</p>
+      </section>
+
+      <section className="settings-section">
+        <h3>Products</h3>
+        <div className="setting-row">
+          <div className="setting-info">
+            <strong>Import from CSV</strong>
+            <p>Columns: <code>name</code> (required), <code>category</code>, <code>unitDefault</code>, <code>pricePerUnit</code>, <code>prepNotes</code>, <code>department</code>. Existing products with the same name are updated.</p>
+          </div>
+          <div className="setting-actions">
+            <input ref={csvInputRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={(e) => void handleImport(e)} />
+            <button type="button" className="secondary" disabled={importing} onClick={() => csvInputRef.current?.click()}>
+              {importing ? "Importing…" : "Import CSV"}
+            </button>
+            <button type="button" className="secondary" onClick={() => void api.products.export()}>
+              Export CSV
+            </button>
+          </div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input ref={csvInputRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={(e) => void handleImport(e)} />
-          <button type="button" className="secondary" disabled={importing} onClick={() => csvInputRef.current?.click()}>
-            {importing ? "Importing…" : "Import CSV"}
-          </button>
-          <a href={api.products.exportUrl()} download className="button secondary">Export CSV</a>
+      </section>
+
+      <section className="settings-section">
+        <h3>Database backup</h3>
+        <div className="setting-row">
+          <div className="setting-info">
+            <strong>Backup &amp; restore</strong>
+            <p>Download a full backup of all orders, products, users and settings. Restore replaces the current database and reloads the page.</p>
+          </div>
+          <div className="setting-actions">
+            <button type="button" className="secondary" onClick={() => void api.backup.download()}>
+              Download backup
+            </button>
+            <input ref={restoreInputRef} type="file" accept=".sqlite,application/octet-stream" style={{ display: "none" }} onChange={(e) => void handleRestore(e)} />
+            <button type="button" className="secondary danger" disabled={restoring} onClick={() => restoreInputRef.current?.click()}>
+              {restoring ? "Restoring…" : "Restore backup"}
+            </button>
+          </div>
         </div>
-      </div>
-      <div className="setting-row">
-        <div className="setting-info">
-          <strong>Database backup &amp; restore</strong>
-          <p>Download a full backup of all orders, products, users, and settings. To restore, upload a backup file — this will replace the current database and reload the page.</p>
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <a href={api.backup.downloadUrl()} download className="button secondary">Download Backup</a>
-          <input ref={restoreInputRef} type="file" accept=".sqlite,application/octet-stream" style={{ display: "none" }} onChange={(e) => void handleRestore(e)} />
-          <button type="button" className="secondary danger" disabled={restoring} onClick={() => restoreInputRef.current?.click()}>
-            {restoring ? "Restoring…" : "Restore Backup"}
-          </button>
-        </div>
-      </div>
+      </section>
+
       {msg && <div className="form-message">{msg}</div>}
     </div>
   );

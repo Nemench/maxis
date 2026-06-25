@@ -19,6 +19,23 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   return res.json() as Promise<T>;
 }
 
+async function download(path: string, filename: string): Promise<void> {
+  const token = sessionStorage.getItem("kot-token");
+  const res = await fetch(`/api${path}`, {
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) }
+  });
+  if (res.status === 401) { sessionStorage.removeItem("kot-token"); window.location.reload(); return; }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({})) as { message?: string };
+    throw new Error(err.message ?? res.statusText);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
 export const api = {
   auth: {
     login: (name: string, pin: string) => req<{ token: string; user: User }>("POST", "/auth/login", { name, pin }),
@@ -35,10 +52,10 @@ export const api = {
       data.id ? req<Product>("PUT", `/products/${data.id}`, data) : req<Product>("POST", "/products", data),
     delete: (id: number) => req<void>("DELETE", `/products/${id}`),
     import: (csv: string) => req<{ imported: number; errors: string[] }>("POST", "/products/import", { csv }),
-    exportUrl: () => "/api/products/export"
+    export: () => download("/products/export", `maxis-products-${new Date().toISOString().slice(0, 10)}.csv`)
   },
   backup: {
-    downloadUrl: () => "/api/backup",
+    download: () => download("/backup", `maxis-backup-${new Date().toISOString().slice(0, 10)}.sqlite`),
     restore: async (file: File): Promise<void> => {
       const token = sessionStorage.getItem("kot-token");
       const buf = await file.arrayBuffer();
