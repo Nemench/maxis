@@ -54,22 +54,6 @@ export const api = {
     import: (csv: string) => req<{ imported: number; errors: string[] }>("POST", "/products/import", { csv }),
     export: () => download("/products/export", `maxis-products-${new Date().toISOString().slice(0, 10)}.csv`)
   },
-  backup: {
-    download: () => download("/backup", `maxis-backup-${new Date().toISOString().slice(0, 10)}.sqlite`),
-    restore: async (file: File): Promise<void> => {
-      const token = sessionStorage.getItem("kot-token");
-      const buf = await file.arrayBuffer();
-      const res = await fetch("/api/backup/restore", {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: buf
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({})) as { message?: string };
-        throw new Error(err.message ?? res.statusText);
-      }
-    }
-  },
   orders: {
     list: (scope: string) => req<Order[]>("GET", `/orders?scope=${scope}`),
     create: (data: CreateOrderInput) => req<Order>("POST", "/orders", data),

@@ -146,28 +146,6 @@ export class KotDatabase {
     return [header, ...rows].join("\n");
   }
 
-  get dataFile(): string {
-    return (this.db as unknown as { name: string }).name;
-  }
-
-  restoreDatabase(buffer: Buffer): void {
-    const dataDir = path.dirname(this.dataFile);
-    const restoreFile = path.join(dataDir, "maxis.sqlite.restore");
-    fs.writeFileSync(restoreFile, buffer);
-    // Validate it's a real SQLite file
-    let testDb: BetterSqlite3.Database | null = null;
-    try {
-      testDb = new BetterSqlite3(restoreFile, { readonly: true });
-      testDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
-    } finally {
-      testDb?.close();
-    }
-    this.db.close();
-    fs.copyFileSync(restoreFile, this.dataFile);
-    fs.unlinkSync(restoreFile);
-    this.initialize();
-  }
-
   deleteProduct(id: number): void {
     this.db.prepare("UPDATE products SET isActive = 0, updatedAt = ? WHERE id = ?").run(new Date().toISOString(), id);
   }

@@ -862,9 +862,7 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
   const [availablePrinters, setAvailablePrinters] = useState<string[]>([]);
   const [loadingPrinters, setLoadingPrinters] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [restoring, setRestoring] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
-  const restoreInputRef = useRef<HTMLInputElement>(null);
 
   const fetchPrinters = async () => {
     setLoadingPrinters(true);
@@ -911,25 +909,6 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
     } finally {
       setImporting(false);
       if (csvInputRef.current) csvInputRef.current.value = "";
-      window.setTimeout(() => setMsg(""), 4000);
-    }
-  };
-
-  const handleRestore = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (!window.confirm("Restore this backup? The current database will be replaced. The page will reload after restore.")) {
-      if (restoreInputRef.current) restoreInputRef.current.value = "";
-      return;
-    }
-    setRestoring(true);
-    try {
-      await api.backup.restore(file);
-      window.location.reload();
-    } catch (err) {
-      setMsg(`Restore failed: ${err instanceof Error ? err.message : "Unknown error"}`);
-      setRestoring(false);
-      if (restoreInputRef.current) restoreInputRef.current.value = "";
       window.setTimeout(() => setMsg(""), 4000);
     }
   };
@@ -990,38 +969,19 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
       </section>
 
       <section className="settings-section">
-        <h3>Products</h3>
+        <h3>Products &amp; backup</h3>
         <div className="setting-row">
           <div className="setting-info">
-            <strong>Import from CSV</strong>
-            <p>CSV must have a <code>name</code> column. Optional: category, unitDefault, pricePerUnit, prepNotes, department. Existing products are updated by name.</p>
+            <strong>Product list</strong>
+            <p>Export saves your product catalog as a CSV. Import loads from one — existing products are updated by name. Use Export as your backup and Import to restore.</p>
           </div>
           <div className="setting-actions">
             <input ref={csvInputRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={(e) => void handleImport(e)} />
             <button type="button" className="secondary" disabled={importing} onClick={() => csvInputRef.current?.click()}>
-              {importing ? "Importing…" : "Import CSV"}
+              {importing ? "Importing…" : "Import"}
             </button>
             <button type="button" className="secondary" onClick={() => void api.products.export()}>
-              Export CSV
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <section className="settings-section">
-        <h3>Database backup</h3>
-        <div className="setting-row">
-          <div className="setting-info">
-            <strong>Backup &amp; restore</strong>
-            <p>Download a full backup of all orders, products, users and settings. Restore replaces the current database and reloads the page.</p>
-          </div>
-          <div className="setting-actions">
-            <button type="button" className="secondary" onClick={() => void api.backup.download()}>
-              Download backup
-            </button>
-            <input ref={restoreInputRef} type="file" accept=".sqlite,application/octet-stream" style={{ display: "none" }} onChange={(e) => void handleRestore(e)} />
-            <button type="button" className="secondary danger" disabled={restoring} onClick={() => restoreInputRef.current?.click()}>
-              {restoring ? "Restoring…" : "Restore backup"}
+              Export
             </button>
           </div>
         </div>
@@ -1175,135 +1135,159 @@ function fmtReceiptTime(rt: string): string {
   return d.toLocaleString(appSettings.locale, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-async function printReceipt(order: Order, type: "kitchen" | "counter" | "master", printStyle = "thermal", printerName = "") {
+function buildReceiptHtml(order: Order, type: "kitchen" | "counter" | "master", style: "thermal" | "a4"): string {
   const items = type === "master" ? order.items : order.items.filter((i) => i.department === type);
-  if (items.length === 0) return;
-
-  // Resolve effective style for this receipt type
-  let resolved = printStyle;
-  if (printStyle === "master_a4") resolved = type === "master" ? "a4" : "thermal";
-  if (printStyle === "dept_a4")   resolved = type !== "master" ? "a4" : "thermal";
-
-  const label = { kitchen: "KITCHEN ORDER", counter: "COUNTER ORDER", master: "RECEIPT" }[type];
+  const label = type === "kitchen" ? "Kitchen Order" : type === "counter" ? "Counter Order" : "Receipt";
   const showPrices = type !== "kitchen";
   const total = items.reduce((s, i) => s + (i.lineTotal ?? 0), 0);
   const d = new Date(order.createdAt);
   const dateStr = d.toLocaleDateString(appSettings.locale);
   const timeStr = d.toLocaleTimeString(appSettings.locale, { hour: "2-digit", minute: "2-digit" });
-  const logoUrl = `${window.location.origin}/logo.jpg`;
 
-  let html: string;
+  const addrLines = order.orderType === "delivery" && order.deliveryAddress?.street
+    ? [order.deliveryAddress.street, order.deliveryAddress.area, order.deliveryAddress.buildingType === "building" && order.deliveryAddress.apartment ? `Apt ${order.deliveryAddress.apartment}` : ""].filter(Boolean)
+    : [];
+  const requestedAtLine = order.requestedTime ? `${order.orderType === "delivery" ? "Deliver at" : "Pickup at"}: ${fmtReceiptTime(order.requestedTime)}` : "";
 
-  if (resolved === "a4") {
-    const a4Rows = items.map((i) => `
-      <tr>
-        <td><b>${i.name}</b>${i.notes ? `<div class="item-note">${i.notes}</div>` : ""}</td>
-        ${showPrices ? `<td>${i.unitPrice != null ? `R${i.unitPrice.toFixed(2)}` : "—"}</td>` : ""}
-        <td>${i.kg ? `${i.kg} kg` : "—"}</td>
-        <td>${i.quantity ? `×${i.quantity}` : "—"}</td>
-        ${showPrices ? `<td style="text-align:right;font-weight:700">${i.lineTotal != null ? `R${i.lineTotal.toFixed(2)}` : "—"}</td>` : ""}
-      </tr>`).join("");
-    html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${label} — ${order.ticketNumber}</title><style>
-      @page{size:A4;margin:18mm}*{box-sizing:border-box;margin:0;padding:0}
-      body{font-family:Inter,'Segoe UI',Arial,sans-serif;font-size:13px;color:#1a1a2e}
-      .hdr{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:14px;border-bottom:3px solid #0d2b6b;margin-bottom:20px}
-      .hdr-left .shop{font-size:20px;font-weight:800;color:#c41f1f}.hdr-left .type{font-size:15px;font-weight:700;color:#0d2b6b;margin-top:4px}
-      .hdr-right{text-align:right}.logo{width:72px;height:72px;border-radius:50%;object-fit:cover;border:2px solid #0d2b6b}
-      .tnum{font-size:14px;font-weight:700;color:#0d2b6b;margin-top:6px}.dt{font-size:12px;color:#666;margin-top:2px}
-      .cbox{border:1px solid #c8d5ee;border-radius:8px;padding:14px 18px;margin-bottom:20px;background:#f4f7fd}
-      .clabel{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#5a6480;font-weight:700;margin-bottom:8px}
-      .cname{font-size:16px;font-weight:700;color:#0d2b6b}.cline{font-size:13px;color:#333;margin-top:4px}
-      .del{color:#c41f1f;font-weight:700}.ttag{color:#0d2b6b;font-weight:600}
-      table{width:100%;border-collapse:collapse;margin-bottom:8px}thead tr{background:#0d2b6b}
-      th{color:#fff;padding:8px 12px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
-      td{padding:9px 12px;border-bottom:1px solid #e8eef7;font-size:13px;vertical-align:top}
-      tr:nth-child(even) td{background:#f8f9fc}tr:last-child td{border-bottom:none}
-      .item-note{font-size:11px;color:#666;margin-top:2px}
-      .tot{display:flex;justify-content:flex-end;padding:12px 12px 0;border-top:2px solid #0d2b6b;margin-top:8px;gap:24px;align-items:baseline}
-      .tot-label{color:#555;font-size:13px}.tot-value{font-size:20px;font-weight:800;color:#0d2b6b}
-      .footer{margin-top:40px;text-align:center;color:#888;font-size:12px;border-top:1px solid #e0e6f0;padding-top:12px}
-    </style></head><body>
-    <div class="hdr">
-      <div class="hdr-left"><div class="shop">MAXIS KOSHER BUTCHERY</div><div class="type">${label}</div></div>
-      <div class="hdr-right"><img class="logo" src="${logoUrl}" alt="MAXIS"><div class="tnum">${order.ticketNumber}</div><div class="dt">${dateStr} &nbsp; ${timeStr}</div></div>
-    </div>
-    <div class="cbox">
-      <div class="clabel">Customer Details</div>
-      <div class="cname">${order.customerName}</div>
-      <div class="cline">${order.customerPhone}</div>
-      <div class="cline ${order.orderType === "delivery" ? "del" : ""}">${order.orderType === "delivery" ? "★ DELIVERY" : "Pickup"}</div>
-      ${order.orderType === "delivery" && order.deliveryAddress?.street ? `<div class="cline">${order.deliveryAddress.street}, ${order.deliveryAddress.area}${order.deliveryAddress.buildingType === "building" && order.deliveryAddress.apartment ? `, Apt ${order.deliveryAddress.apartment}` : ""}</div>` : ""}
-      ${order.requestedTime ? `<div class="cline ttag">${order.orderType === "delivery" ? "Deliver at" : "Pickup at"}: ${fmtReceiptTime(order.requestedTime)}</div>` : ""}
-      ${order.requestedByName ? `<div class="cline">Served by: ${order.requestedByName}</div>` : ""}
-      ${order.assignedTo ? `<div class="cline">Assigned to: <b>${order.assignedTo}</b></div>` : ""}
-    </div>
-    <table><thead><tr><th>Item</th>${showPrices ? "<th>R/kg</th>" : ""}<th>Kg</th><th>Qty</th>${showPrices ? '<th style="text-align:right">Total</th>' : ""}</tr></thead>
-    <tbody>${a4Rows}</tbody></table>
-    ${showPrices && total > 0 ? `<div class="tot"><div class="tot-label">ORDER TOTAL</div><div class="tot-value">R${total.toFixed(2)}</div></div>` : ""}
-    <div class="footer">Thank you for your order — MAXIS Discount Kosher Butchery</div>
-    <script>window.onload=function(){window.print();window.onafterprint=function(){window.close();};}</script>
-    </body></html>`;
-  } else {
-    const thermalRows = items.map((i) => {
-      const qty = [i.kg ? `${i.kg} kg` : "", i.quantity ? `×${i.quantity}` : ""].filter(Boolean).join("  ");
-      const lineTotal = showPrices && i.lineTotal ? `R${i.lineTotal.toFixed(2)}` : "";
-      return `<div class="item"><div class="item-name">${i.name}</div><div class="item-sub"><span>${qty}${i.notes ? `  ${i.notes}` : ""}</span>${lineTotal ? `<span class="amt">${lineTotal}</span>` : ""}</div></div>`;
-    }).join("");
-    html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${label} — ${order.ticketNumber}</title><style>
-      @page{size:80mm auto;margin:4mm}*{box-sizing:border-box;margin:0;padding:0}
-      body{font-family:'Courier New',Courier,monospace;font-size:12px;width:72mm;margin:0 auto;line-height:1.5;color:#000}
-      .center{text-align:center}.sep{border:none;border-top:1px dashed #999;margin:7px 0}.sep2{border:none;border-top:2px solid #000;margin:7px 0}
-      .logo{width:52px;height:52px;border-radius:50%;object-fit:cover;margin-bottom:4px}
-      .shop-name{font-size:13px;font-weight:bold;color:#c41f1f;letter-spacing:.5px}
-      .label{font-size:15px;font-weight:bold;letter-spacing:1px;color:#0d2b6b;margin-top:2px}
-      .ticket-num{font-size:12px;font-weight:bold;color:#333}.datetime{font-size:11px;color:#555}
-      .customer{margin:4px 0}.customer b{font-size:13px}
-      .delivery-tag{font-weight:bold;color:#c41f1f;font-size:12px}
-      .addr{font-size:11px;color:#333;margin-top:2px}.time-tag{font-size:11px;font-weight:bold;color:#0d2b6b;margin-top:2px}
-      .item{margin:5px 0}.item-name{font-weight:bold}
-      .item-sub{display:flex;justify-content:space-between;color:#444;font-size:11px;margin-top:1px}
-      .amt{font-weight:bold;color:#000;white-space:nowrap;padding-left:8px}
-      .total-row{display:flex;justify-content:space-between;font-weight:bold;font-size:14px;margin:4px 0;color:#0d2b6b}
-      .served-by{font-size:10px;color:#666;margin-top:3px}.thank-you{font-size:11px;color:#555}
-      @media print{body{width:72mm}}
-    </style></head><body>
-    <div class="center">
-      <img class="logo" src="${logoUrl}" alt="MAXIS">
-      <div class="shop-name">MAXIS KOSHER BUTCHERY</div>
-      <div class="label">${label}</div>
-      <div class="ticket-num">${order.ticketNumber}</div>
-      <div class="datetime">${dateStr} &nbsp; ${timeStr}</div>
-    </div>
-    <hr class="sep">
-    <div class="customer">
-      <b>${order.customerName}</b><br>${order.customerPhone}<br>
-      <span class="${order.orderType === "delivery" ? "delivery-tag" : ""}">${order.orderType === "delivery" ? "*** DELIVERY ***" : "Pickup"}</span>
-      ${order.orderType === "delivery" && order.deliveryAddress?.street ? `<div class="addr">${order.deliveryAddress.street}</div><div class="addr">${order.deliveryAddress.area}</div>${order.deliveryAddress.buildingType === "building" && order.deliveryAddress.apartment ? `<div class="addr">Apt: ${order.deliveryAddress.apartment}</div>` : ""}` : ""}
-      ${order.requestedTime ? `<div class="time-tag">${order.orderType === "delivery" ? "Deliver at" : "Pickup at"}: ${fmtReceiptTime(order.requestedTime)}</div>` : ""}
-      ${order.requestedByName ? `<div class="served-by">Served by: ${order.requestedByName}</div>` : ""}
-      ${order.assignedTo ? `<div class="served-by">Assigned to: <b>${order.assignedTo}</b></div>` : ""}
-    </div>
-    <hr class="sep">
-    ${thermalRows}
-    ${showPrices && total > 0 ? `<hr class="sep2"><div class="total-row"><span>TOTAL</span><span>R${total.toFixed(2)}</span></div>` : ""}
-    <hr class="sep">
-    <div class="center thank-you">Thank you for your order</div>
-    <script>window.onload=function(){window.print();window.onafterprint=function(){window.close();};}</script>
-    </body></html>`;
+  if (style === "a4") {
+    const rows = items.map((i) => `<tr>
+      <td><strong>${esc(i.name)}</strong>${i.notes ? `<div class="note">${esc(i.notes)}</div>` : ""}</td>
+      ${showPrices ? `<td>${i.unitPrice != null ? `R${i.unitPrice.toFixed(2)}` : "—"}</td>` : ""}
+      <td>${i.kg ? `${i.kg} kg` : i.quantity ? `×${i.quantity}` : "—"}</td>
+      ${showPrices ? `<td class="right">${i.lineTotal != null ? `<strong>R${i.lineTotal.toFixed(2)}</strong>` : "—"}</td>` : ""}
+    </tr>`).join("");
+
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(label)} ${esc(order.ticketNumber)}</title><style>
+@page{size:A4;margin:20mm}*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Inter,'Segoe UI',Arial,sans-serif;font-size:13px;color:#1a1a2e;line-height:1.5}
+.hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #0d2b6b;padding-bottom:16px;margin-bottom:20px}
+.brand{font-size:22px;font-weight:800;color:#c41f1f}.rtype{font-size:14px;font-weight:700;color:#0d2b6b;margin-top:4px}
+.hdr-r{text-align:right}.tnum{font-size:16px;font-weight:800;color:#0d2b6b}.dt{font-size:12px;color:#666;margin-top:2px}
+.cbox{background:#f0f4fd;border:1px solid #c8d5ee;border-radius:8px;padding:14px 18px;margin-bottom:20px}
+.clbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#5a6480;margin-bottom:8px}
+.cname{font-size:18px;font-weight:700;color:#0d2b6b}.cline{font-size:13px;color:#333;margin-top:3px}
+.del{color:#c41f1f;font-weight:700}.ttag{color:#0d2b6b;font-weight:600}
+table{width:100%;border-collapse:collapse}
+thead tr{background:#0d2b6b}
+th{color:#fff;padding:9px 12px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+td{padding:9px 12px;border-bottom:1px solid #e8eef7;vertical-align:top}
+tr:nth-child(even) td{background:#f8f9fc}tr:last-child td{border-bottom:none}
+.right{text-align:right}.note{font-size:11px;color:#888;margin-top:2px;font-style:italic}
+.tot{display:flex;justify-content:flex-end;gap:20px;align-items:baseline;border-top:2px solid #0d2b6b;padding-top:12px;margin-top:8px}
+.tot-lbl{font-size:13px;color:#5a6480}.tot-val{font-size:22px;font-weight:800;color:#0d2b6b}
+.footer{margin-top:40px;text-align:center;color:#888;font-size:12px;border-top:1px solid #e0e6f0;padding-top:12px}
+</style></head><body>
+<div class="hdr">
+  <div><div class="brand">MAXIS KOSHER BUTCHERY</div><div class="rtype">${esc(label)}</div></div>
+  <div class="hdr-r"><div class="tnum">${esc(order.ticketNumber)}</div><div class="dt">${dateStr} · ${timeStr}</div></div>
+</div>
+<div class="cbox">
+  <div class="clbl">Customer</div>
+  <div class="cname">${esc(order.customerName)}</div>
+  <div class="cline">${esc(order.customerPhone)}</div>
+  <div class="cline ${order.orderType === "delivery" ? "del" : ""}">${order.orderType === "delivery" ? "★ DELIVERY" : "Pickup"}</div>
+  ${addrLines.map((l) => `<div class="cline">${esc(l)}</div>`).join("")}
+  ${requestedAtLine ? `<div class="cline ttag">${esc(requestedAtLine)}</div>` : ""}
+  ${order.requestedByName ? `<div class="cline">Served by: ${esc(order.requestedByName)}</div>` : ""}
+  ${order.assignedTo ? `<div class="cline">Assigned to: <strong>${esc(order.assignedTo)}</strong></div>` : ""}
+</div>
+<table>
+  <thead><tr>
+    <th>Item</th>
+    ${showPrices ? "<th>Unit price</th>" : ""}
+    <th>Qty / weight</th>
+    ${showPrices ? '<th class="right">Total</th>' : ""}
+  </tr></thead>
+  <tbody>${rows}</tbody>
+</table>
+${showPrices && total > 0 ? `<div class="tot"><div class="tot-lbl">ORDER TOTAL</div><div class="tot-val">R${total.toFixed(2)}</div></div>` : ""}
+<div class="footer">Thank you for your order — MAXIS Discount Kosher Butchery</div>
+</body></html>`;
   }
+
+  // Thermal
+  const rows = items.map((i) => {
+    const qty = [i.kg ? `${i.kg} kg` : "", i.quantity ? `×${i.quantity}` : ""].filter(Boolean).join("  ");
+    const amt = showPrices && i.lineTotal ? `R${i.lineTotal.toFixed(2)}` : "";
+    return `<div class="item">
+  <div class="iname">${esc(i.name)}</div>
+  <div class="isub"><span>${esc(qty)}${i.notes ? `  <em>${esc(i.notes)}</em>` : ""}</span>${amt ? `<span class="amt">${amt}</span>` : ""}</div>
+</div>`;
+  }).join("");
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(label)} ${esc(order.ticketNumber)}</title><style>
+@page{size:80mm auto;margin:4mm 5mm}*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Inter,'Segoe UI',Arial,sans-serif;font-size:12px;color:#000;line-height:1.45}
+.center{text-align:center}
+.shop{font-size:14px;font-weight:800;color:#0d2b6b;letter-spacing:.3px}
+.lbl{font-size:13px;font-weight:700;letter-spacing:.5px;margin:2px 0}
+.sub{font-size:11px;color:#555}
+hr{border:none;border-top:1px dashed #bbb;margin:6px 0}
+.cust{margin:4px 0}
+.cname{font-size:13px;font-weight:700}
+.cphone{font-size:12px;color:#333}
+.del{font-weight:700;color:#c41f1f}
+.addr{font-size:11px;color:#444;margin-top:1px}
+.ttag{font-size:11px;font-weight:700;color:#0d2b6b;margin-top:2px}
+.by{font-size:10px;color:#666;margin-top:2px}
+.item{padding:4px 0;border-bottom:1px dotted #ddd}
+.item:last-child{border-bottom:none}
+.iname{font-weight:700}
+.isub{display:flex;justify-content:space-between;font-size:11px;color:#555;margin-top:1px}
+.amt{font-weight:700;color:#000;white-space:nowrap;padding-left:8px}
+.tot{display:flex;justify-content:space-between;font-weight:800;font-size:14px;padding-top:5px}
+.footer{text-align:center;font-size:10px;color:#888;margin-top:6px}
+</style></head><body>
+<div class="center">
+  <div class="shop">MAXIS KOSHER BUTCHERY</div>
+  <div class="lbl">${esc(label.toUpperCase())}</div>
+  <div class="sub">${esc(order.ticketNumber)} &middot; ${dateStr} ${timeStr}</div>
+</div>
+<hr>
+<div class="cust">
+  <div class="cname">${esc(order.customerName)}</div>
+  <div class="cphone">${esc(order.customerPhone)}</div>
+  <div class="${order.orderType === "delivery" ? "del" : "cphone"}">${order.orderType === "delivery" ? "★ DELIVERY" : "Pickup"}</div>
+  ${addrLines.map((l) => `<div class="addr">${esc(l)}</div>`).join("")}
+  ${requestedAtLine ? `<div class="ttag">${esc(requestedAtLine)}</div>` : ""}
+  ${order.requestedByName ? `<div class="by">Served by: ${esc(order.requestedByName)}</div>` : ""}
+  ${order.assignedTo ? `<div class="by">Assigned to: <strong>${esc(order.assignedTo)}</strong></div>` : ""}
+</div>
+<hr>
+${rows}
+${showPrices && total > 0 ? `<hr><div class="tot"><span>TOTAL</span><span>R${total.toFixed(2)}</span></div>` : ""}
+<div class="footer">Thank you — Maxis Discount Kosher Butchery</div>
+</body></html>`;
+}
+
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function printHtml(html: string): void {
+  const iframe = document.createElement("iframe");
+  iframe.style.cssText = "position:fixed;width:0;height:0;border:none;opacity:0;top:-9999px";
+  document.body.appendChild(iframe);
+  const doc = iframe.contentDocument!;
+  doc.open(); doc.write(html); doc.close();
+  iframe.contentWindow!.onafterprint = () => { document.body.removeChild(iframe); };
+  setTimeout(() => { iframe.contentWindow?.print(); }, 150);
+}
+
+async function printReceipt(order: Order, type: "kitchen" | "counter" | "master", printStyle = "thermal", printerName = "") {
+  const items = type === "master" ? order.items : order.items.filter((i) => i.department === type);
+  if (items.length === 0) return;
+
+  let resolved: "thermal" | "a4" = printStyle === "a4" ? "a4" : "thermal";
+  if (printStyle === "master_a4") resolved = type === "master" ? "a4" : "thermal";
+  if (printStyle === "dept_a4")   resolved = type !== "master" ? "a4" : "thermal";
+
+  const html = buildReceiptHtml(order, type, resolved);
 
   if (printerName) {
-    try {
-      await api.print(printerName, html);
-    } catch {
-      // Fall back to browser dialog on server print failure
-      const win = window.open("", "_blank", resolved === "a4" ? "width=900,height=700" : "width=380,height=720");
-      if (win) { win.document.write(html); win.document.close(); }
-    }
-  } else {
-    const win = window.open("", "_blank", resolved === "a4" ? "width=900,height=700" : "width=380,height=720");
-    if (win) { win.document.write(html); win.document.close(); }
+    try { await api.print(printerName, html); return; } catch { /* fall through to browser print */ }
   }
+  printHtml(html);
 }
 
 // ── Urgency helpers ───────────────────────────────────────────────────────────
