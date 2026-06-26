@@ -23,6 +23,10 @@ apt-get update -qq
 apt-get install -y -qq curl git build-essential python3 cups-client avahi-utils
 
 # ── Caddy (HTTPS reverse proxy) ───────────────────────────────────────────────
+# Clean up any leftover files from a previous failed install attempt
+rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+rm -f /etc/apt/sources.list.d/caddy-stable.list
+
 if ! command -v caddy &>/dev/null; then
   info "Installing Caddy (automatic HTTPS)..."
   # Download binary directly from GitHub — no GPG keys or apt repos needed
