@@ -907,7 +907,8 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
         savedCount++;
       }
       setSupplierId(finalSupplierId);
-      setProductId(""); setGrades({ A: false, B: false, C: false }); setPieces(1); setWeightKg("");
+      // Item and grade stay selected as defaults for the next line — only weight/pieces reset
+      setPieces(1); setWeightKg("");
       setMsg(savedCount > 1 ? `Logged ${savedCount} grade rows.` : "Logged.");
       await onChanged();
     } catch (err) {
