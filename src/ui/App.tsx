@@ -21,11 +21,13 @@ import {
   Plus,
   Printer,
   Save,
+  ScanLine,
   Scissors,
   Settings,
   Trash2,
   Users,
-  Weight
+  Weight,
+  X
 } from "lucide-react";
 import { appSettings } from "../shared/settings";
 import type {
@@ -52,7 +54,7 @@ type Tab = "orders" | "queue" | "history" | "products" | "users" | "settings" | 
 
 const deptStatusFlow: DeptStatus[] = ["New", "Received", "Ready", "Done"];
 const emptyLine: OrderItemInput = { productId: null, name: "", kg: null, quantity: null, notes: "", unitPrice: null, lineTotal: null, department: "counter" };
-const EMPTY_PRODUCT: ProductInput = { name: "", category: "", unitDefault: "kg", pricePerUnit: null, prepNotes: "", department: "counter", lowStockThreshold: null };
+const EMPTY_PRODUCT: ProductInput = { name: "", category: "", unitDefault: "kg", pricePerUnit: null, prepNotes: "", department: "counter", lowStockThreshold: null, barcode: null };
 
 const currency = new Intl.NumberFormat(appSettings.locale, { style: "currency", currency: appSettings.currency });
 
@@ -361,6 +363,17 @@ function OrderEntry({ products, currentUser, autoPrint, printStyle, printerMap, 
     setLine(index, { productId: p.id, name: p.name, unitPrice: p.pricePerUnit, notes: p.prepNotes, department: p.department });
   };
 
+  const [barcodeModalOpen, setBarcodeModalOpen] = useState(false);
+
+  // A scanned/quick-created product only tells us item + price, not
+  // kg/quantity — appended as a new line (replacing a still-blank first
+  // line rather than piling up empties) for the cashier to fill in weight/qty.
+  const addLineFromBarcode = (p: Product) => {
+    const newLine: OrderItemInput = { productId: p.id, name: p.name, kg: null, quantity: null, notes: p.prepNotes, unitPrice: p.pricePerUnit, lineTotal: null, department: p.department };
+    setItems((cur) => (cur.length === 1 && !cur[0].name.trim() ? [newLine] : [...cur, newLine]));
+    setBarcodeModalOpen(false);
+  };
+
   const [submitError, setSubmitError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -483,10 +496,178 @@ function OrderEntry({ products, currentUser, autoPrint, printStyle, printerMap, 
         <button type="button" className="secondary" onClick={() => setItems((cur) => [...cur, { ...emptyLine, department: defaultDept }])}>
           <Plus size={18} /> Add item
         </button>
+        <button type="button" className="secondary" onClick={() => setBarcodeModalOpen(true)}>
+          <ScanLine size={18} /> Scan barcode
+        </button>
         <button type="submit" disabled={!canSave || submitting}><Save size={18} /> {submitting ? "Creating…" : "Create Order"}</button>
       </footer>
       {submitError && <p className="form-error">{submitError}</p>}
+      {barcodeModalOpen && (
+        <BarcodeAddModal defaultDept={defaultDept} onAdd={addLineFromBarcode} onClose={() => setBarcodeModalOpen(false)} />
+      )}
     </form>
+  );
+}
+
+// ── Barcode add modal ────────────────────────────────────────────────────────
+// Camera-based barcode scanning (via the browser's BarcodeDetector API, not
+// a native Capacitor plugin) plus a manual-entry fallback for when the
+// camera isn't available or the device doesn't support BarcodeDetector.
+// Same code path works in both a desktop/mobile browser and the Android
+// app's WebView, since it's a standard web API rather than native code.
+const BARCODE_FORMATS = ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "itf", "qr_code"];
+
+type BarcodeStep = "choice" | "scan" | "manual" | "create";
+
+function BarcodeAddModal({ defaultDept, onAdd, onClose }: { defaultDept: Department; onAdd: (p: Product) => void; onClose: () => void }) {
+  const [step, setStep] = useState<BarcodeStep>("choice");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [manualCode, setManualCode] = useState("");
+  const [pendingBarcode, setPendingBarcode] = useState("");
+  const [createName, setCreateName] = useState("");
+  const [createPrice, setCreatePrice] = useState("");
+  const [createDept, setCreateDept] = useState<Department>(defaultDept);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  const cameraSupported = typeof navigator !== "undefined" && !!navigator.mediaDevices && "BarcodeDetector" in window;
+
+  const stopCamera = () => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  };
+
+  // Looks up a resolved barcode (from either scan or manual entry); on a
+  // 404 it's treated as "not found yet" and routes to quick-create rather
+  // than a dead-end error, per how this feature is meant to work.
+  const resolveBarcode = async (code: string) => {
+    setBusy(true); setError("");
+    try {
+      const product = await api.products.getByBarcode(code);
+      onAdd(product);
+    } catch {
+      setPendingBarcode(code);
+      setCreateName(""); setCreatePrice(""); setCreateDept(defaultDept);
+      setStep("create");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (step !== "scan") return;
+    if (!cameraSupported) { setError("Camera scanning isn't supported on this device — enter the barcode manually instead."); setStep("choice"); return; }
+
+    let cancelled = false;
+    let intervalId: number;
+    const detector = new BarcodeDetector({ formats: BARCODE_FORMATS });
+
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+      .then((stream) => {
+        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) { videoRef.current.srcObject = stream; void videoRef.current.play(); }
+        intervalId = window.setInterval(async () => {
+          if (!videoRef.current || videoRef.current.readyState < 2) return;
+          try {
+            const results = await detector.detect(videoRef.current);
+            if (results.length > 0) {
+              window.clearInterval(intervalId);
+              stopCamera();
+              void resolveBarcode(results[0].rawValue);
+            }
+          } catch { /* transient decode failure — retried on the next tick */ }
+        }, 300);
+      })
+      .catch(() => { if (!cancelled) { setError("Couldn't access the camera — check permissions, or enter the barcode manually."); setStep("choice"); } });
+
+    return () => { cancelled = true; window.clearInterval(intervalId); stopCamera(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
+
+  const submitManual = (e: FormEvent) => {
+    e.preventDefault();
+    if (!manualCode.trim()) return;
+    void resolveBarcode(manualCode.trim());
+  };
+
+  const submitCreate = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!createName.trim()) { setError("Enter a name."); return; }
+    setBusy(true); setError("");
+    try {
+      const product = await api.products.quickCreate({
+        name: createName.trim(),
+        barcode: pendingBarcode,
+        pricePerUnit: createPrice ? Number(createPrice) : null,
+        department: createDept
+      });
+      onAdd(product);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create product.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal-card panel">
+        <div className="modal-header">
+          <h2>Add by barcode</h2>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </div>
+
+        {step === "choice" && (
+          <div className="modal-body barcode-choice">
+            <button type="button" onClick={() => setStep("scan")}><ScanLine size={18} /> Scan with camera</button>
+            <button type="button" className="secondary" onClick={() => { setManualCode(""); setStep("manual"); }}>Enter barcode manually</button>
+          </div>
+        )}
+
+        {step === "scan" && (
+          <div className="modal-body barcode-scan">
+            <video ref={videoRef} className="barcode-video" muted playsInline />
+            <p className="settings-hint">Point the camera at the barcode.</p>
+            <button type="button" className="secondary" onClick={() => setStep("choice")}>Cancel</button>
+          </div>
+        )}
+
+        {step === "manual" && (
+          <form className="modal-body" onSubmit={submitManual}>
+            <label>Barcode
+              <input inputMode="numeric" autoFocus value={manualCode} onChange={(e) => setManualCode(e.target.value)} placeholder="e.g. 6001234567890" />
+            </label>
+            <footer className="actions">
+              <button type="button" className="secondary" onClick={() => setStep("choice")}>Back</button>
+              <button type="submit" disabled={busy || !manualCode.trim()}>{busy ? "Looking up…" : "Find item"}</button>
+            </footer>
+          </form>
+        )}
+
+        {step === "create" && (
+          <form className="modal-body" onSubmit={(e) => void submitCreate(e)}>
+            <p className="settings-hint">No item found for barcode <b>{pendingBarcode}</b> — add it now.</p>
+            <label>Name<input value={createName} onChange={(e) => setCreateName(e.target.value)} autoFocus required /></label>
+            <label>R/kg<input type="number" min="0" step="0.01" value={createPrice} onChange={(e) => setCreatePrice(e.target.value)} /></label>
+            <label>
+              Department
+              <select value={createDept} onChange={(e) => setCreateDept(e.target.value as Department)}>
+                <option value="counter">Counter (raw meat)</option>
+                <option value="kitchen">Kitchen (cooked)</option>
+              </select>
+            </label>
+            <footer className="actions">
+              <button type="button" className="secondary" onClick={() => setStep("choice")}>Back</button>
+              <button type="submit" disabled={busy || !createName.trim()}>{busy ? "Adding…" : "Add item"}</button>
+            </footer>
+          </form>
+        )}
+
+        {error && <p className="form-error">{error}</p>}
+      </div>
+    </div>
   );
 }
 
@@ -833,6 +1014,10 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
           <input type="number" min="0" step="0.01" value={editing.pricePerUnit ?? ""} onChange={(e) => setEditing({ ...editing, pricePerUnit: e.target.value ? Number(e.target.value) : null })} />
         </label>
         <label>Prep notes<textarea value={editing.prepNotes} onChange={(e) => setEditing({ ...editing, prepNotes: e.target.value })} /></label>
+        <label>
+          Barcode <span className="optional-hint">(optional — auto-filled by the Scan barcode button on new orders)</span>
+          <input value={editing.barcode ?? ""} onChange={(e) => setEditing({ ...editing, barcode: e.target.value })} placeholder="e.g. 6001234567890" />
+        </label>
         <label>
           Low-stock threshold
           <input type="number" min="0" step="0.01" placeholder="No warning" value={editing.lowStockThreshold ?? ""} onChange={(e) => setEditing({ ...editing, lowStockThreshold: e.target.value ? Number(e.target.value) : null })} />

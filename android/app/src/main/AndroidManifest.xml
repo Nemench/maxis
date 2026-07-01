@@ -91,4 +91,8 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Camera-based barcode scanning (Scan barcode button on New Order) — uses
+         the WebView's standard getUserMedia prompt, not a native camera API. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 </manifest>

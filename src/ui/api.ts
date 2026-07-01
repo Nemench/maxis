@@ -1,7 +1,7 @@
 // Thin typed wrapper around the backend REST API. Every call goes through
 // req()/download(), which attach the JWT and centrally handle a 401 (token
 // missing/expired) by clearing it and forcing a reload back to the login screen.
-import type { User, UserInput, Product, ProductInput, Order, CreateOrderInput, OrderStatus, Department, DeptStatus, Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput } from "../shared/types";
+import type { User, UserInput, Product, ProductInput, QuickCreateProductInput, Order, CreateOrderInput, OrderStatus, Department, DeptStatus, Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput } from "../shared/types";
 import { tokenStorage } from "./tokenStorage";
 
 // JSON request/response helper used by nearly every endpoint below.
@@ -59,7 +59,9 @@ export const api = {
       data.id ? req<Product>("PUT", `/products/${data.id}`, data) : req<Product>("POST", "/products", data),
     delete: (id: number) => req<void>("DELETE", `/products/${id}`),
     import: (csv: string) => req<{ imported: number; errors: string[] }>("POST", "/products/import", { csv }),
-    export: () => download("/products/export", `maxis-products-${new Date().toISOString().slice(0, 10)}.csv`)
+    export: () => download("/products/export", `maxis-products-${new Date().toISOString().slice(0, 10)}.csv`),
+    getByBarcode: (code: string) => req<Product>("GET", `/products/barcode/${encodeURIComponent(code)}`),
+    quickCreate: (data: QuickCreateProductInput) => req<Product>("POST", "/products/quick-create", data)
   },
   backup: {
     download: () => download("/backup", `maxis-backup-${new Date().toISOString().slice(0, 10)}.json`),

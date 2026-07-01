@@ -45,6 +45,7 @@ export interface Product {
   onHandQty: number;
   lastCountedAt: string | null;
   lastCountedById: number | null;
+  barcode: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -58,6 +59,17 @@ export interface ProductInput {
   prepNotes: string;
   department: Department;
   lowStockThreshold: number | null;
+  barcode?: string | null;
+}
+
+// Minimal fields needed to quick-create a product from an unrecognized
+// barcode scan at the register — everything else defaults sensibly
+// server-side (see db.quickCreateProductByBarcode).
+export interface QuickCreateProductInput {
+  name: string;
+  barcode: string;
+  pricePerUnit: number | null;
+  department: Department;
 }
 
 // ── Weigh-in (stock-taking) ──────────────────────────────────────────────────

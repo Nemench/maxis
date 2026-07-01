@@ -8,7 +8,7 @@ import bcrypt from "bcryptjs";
 import path from "node:path";
 import fs from "node:fs";
 import type {
-  Product, ProductInput,
+  Product, ProductInput, QuickCreateProductInput,
   Order, OrderItem, CreateOrderInput, OrderStatus,
   User, UserInput,
   Department, DeptStatus, DeliveryAddress,
@@ -97,23 +97,50 @@ export class KotDatabase {
 
   listProducts(): Product[] {
     return this.db
-      .prepare("SELECT id, name, category, unitDefault, pricePerUnit, prepNotes, department, isActive, lowStockThreshold, onHandQty, lastCountedAt, lastCountedById, createdAt, updatedAt FROM products WHERE isActive = 1 ORDER BY category, name")
+      .prepare("SELECT id, name, category, unitDefault, pricePerUnit, prepNotes, department, isActive, lowStockThreshold, onHandQty, lastCountedAt, lastCountedById, barcode, createdAt, updatedAt FROM products WHERE isActive = 1 ORDER BY category, name")
       .all() as Product[];
+  }
+
+  getProductByBarcode(barcode: string): Product | null {
+    return this.db.prepare("SELECT * FROM products WHERE barcode = ? AND isActive = 1").get(barcode) as Product | null;
   }
 
   upsertProduct(input: ProductInput): Product {
     const now = new Date().toISOString();
+    const barcode = input.barcode?.trim() || null;
     if (input.id) {
       this.db
-        .prepare("UPDATE products SET name=?, category=?, unitDefault=?, pricePerUnit=?, prepNotes=?, department=?, lowStockThreshold=?, updatedAt=? WHERE id=?")
-        .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, input.lowStockThreshold ?? null, now, input.id);
+        .prepare("UPDATE products SET name=?, category=?, unitDefault=?, pricePerUnit=?, prepNotes=?, department=?, lowStockThreshold=?, barcode=?, updatedAt=? WHERE id=?")
+        .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, input.lowStockThreshold ?? null, barcode, now, input.id);
       return this.db.prepare("SELECT * FROM products WHERE id = ?").get(input.id) as Product;
     } else {
       const result = this.db
-        .prepare("INSERT INTO products (name, category, unitDefault, pricePerUnit, prepNotes, department, lowStockThreshold, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)")
-        .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, input.lowStockThreshold ?? null, now, now);
+        .prepare("INSERT INTO products (name, category, unitDefault, pricePerUnit, prepNotes, department, lowStockThreshold, barcode, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)")
+        .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, input.lowStockThreshold ?? null, barcode, now, now);
       return this.db.prepare("SELECT * FROM products WHERE id = ?").get(Number(result.lastInsertRowid)) as Product;
     }
+  }
+
+  // Minimal product creation from an unrecognized barcode scan at the
+  // register — everything but name/barcode/price/department defaults
+  // sensibly (same defaults as CSV import), so a cashier can add a new
+  // item in one step without needing full admin product-management access.
+  quickCreateProductByBarcode(input: QuickCreateProductInput): Product {
+    const barcode = input.barcode.trim();
+    if (!barcode) throw new Error("Barcode is required");
+    const name = input.name.trim();
+    if (!name) throw new Error("Name is required");
+    if (this.getProductByBarcode(barcode)) throw new Error("A product with this barcode already exists");
+    return this.upsertProduct({
+      name,
+      category: "General",
+      unitDefault: "kg",
+      pricePerUnit: input.pricePerUnit,
+      prepNotes: "",
+      department: input.department,
+      lowStockThreshold: null,
+      barcode
+    });
   }
 
   // Sets on-hand quantity directly — a physical recount from the Stock Take screen.
@@ -388,8 +415,8 @@ export class KotDatabase {
         }
         const now = new Date().toISOString();
         for (const p of products) {
-          this.db.prepare("INSERT INTO products (id,name,category,unitDefault,pricePerUnit,prepNotes,department,lowStockThreshold,onHandQty,lastCountedAt,lastCountedById,isActive,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?)")
-            .run(p.id ?? null, p.name, p.category, p.unitDefault, p.pricePerUnit ?? null, p.prepNotes, p.department, p.lowStockThreshold ?? null, p.onHandQty ?? 0, p.lastCountedAt ?? null, p.lastCountedById ?? null, p.createdAt ?? now, p.updatedAt ?? now);
+          this.db.prepare("INSERT INTO products (id,name,category,unitDefault,pricePerUnit,prepNotes,department,lowStockThreshold,onHandQty,lastCountedAt,lastCountedById,barcode,isActive,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)")
+            .run(p.id ?? null, p.name, p.category, p.unitDefault, p.pricePerUnit ?? null, p.prepNotes, p.department, p.lowStockThreshold ?? null, p.onHandQty ?? 0, p.lastCountedAt ?? null, p.lastCountedById ?? null, p.barcode ?? null, p.createdAt ?? now, p.updatedAt ?? now);
         }
         const insOrder = this.db.prepare("INSERT INTO orders (id,ticketNumber,customerName,customerPhone,orderType,deliveryAddress,requestedTime,assignedTo,status,kitchenStatus,counterStatus,requestedById,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
         for (const o of orders) insOrder.run(o.id,o.ticketNumber,o.customerName,o.customerPhone,o.orderType,o.deliveryAddress,o.requestedTime,o.assignedTo??null,o.status,o.kitchenStatus,o.counterStatus,o.requestedById??null,o.createdAt,o.updatedAt);
@@ -645,6 +672,7 @@ export class KotDatabase {
       if (!prodCols.includes("onHandQty")) this.db.exec("ALTER TABLE products ADD COLUMN onHandQty REAL NOT NULL DEFAULT 0");
       if (!prodCols.includes("lastCountedAt")) this.db.exec("ALTER TABLE products ADD COLUMN lastCountedAt TEXT");
       if (!prodCols.includes("lastCountedById")) this.db.exec("ALTER TABLE products ADD COLUMN lastCountedById INTEGER REFERENCES users(id)");
+      if (!prodCols.includes("barcode")) this.db.exec("ALTER TABLE products ADD COLUMN barcode TEXT");
     }
 
     this.db.exec(`
@@ -673,6 +701,7 @@ export class KotDatabase {
         onHandQty REAL NOT NULL DEFAULT 0,
         lastCountedAt TEXT,
         lastCountedById INTEGER REFERENCES users(id),
+        barcode TEXT,
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL
       );
@@ -746,6 +775,7 @@ export class KotDatabase {
       CREATE INDEX IF NOT EXISTS idx_wil_batchId   ON weigh_in_lines(batchId);
       CREATE INDEX IF NOT EXISTS idx_wil_createdAt ON weigh_in_lines(createdAt DESC);
       CREATE INDEX IF NOT EXISTS idx_wib_status    ON weigh_in_batches(status);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_prod_barcode ON products(barcode) WHERE barcode IS NOT NULL;
     `);
 
     // Seed default settings

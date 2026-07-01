@@ -2,12 +2,41 @@
 import { Router } from "express";
 import { db } from "../index.js";
 import { requireAuth, requireAdmin } from "../auth.js";
-import type { ProductInput } from "../../src/shared/types.js";
+import type { AuthRequest } from "../auth.js";
+import type { ProductInput, QuickCreateProductInput } from "../../src/shared/types.js";
 
 const router = Router();
 router.use(requireAuth);
 
+// Roles that build orders/receipts and so are allowed to add a new item
+// on the spot via an unrecognized barcode scan (see quick-create below) —
+// deliberately narrower than full admin product management.
+const canQuickCreate = (req: AuthRequest) =>
+  req.user?.role === "admin" || req.user?.role === "cashier" || req.user?.role === "master_cashier";
+
 router.get("/", (_req, res) => { res.json(db.listProducts()); });
+
+// Barcode lookup for the "scan to add to order" flow. Any authenticated
+// user can look up (read-only, same posture as GET / above).
+router.get("/barcode/:code", (req, res) => {
+  const product = db.getProductByBarcode(req.params.code);
+  if (!product) { res.status(404).json({ message: "No product found for this barcode" }); return; }
+  res.json(product);
+});
+
+// Minimal product creation from an unrecognized barcode scan — see
+// db.quickCreateProductByBarcode for the field defaults this applies.
+router.post("/quick-create", (req: AuthRequest, res) => {
+  if (!canQuickCreate(req)) {
+    res.status(403).json({ message: "Not authorized to add products" });
+    return;
+  }
+  try {
+    res.status(201).json(db.quickCreateProductByBarcode(req.body as QuickCreateProductInput));
+  } catch (err) {
+    res.status(400).json({ message: err instanceof Error ? err.message : "Failed to create product" });
+  }
+});
 
 // Only admins may create, update, or delete products
 router.post("/", requireAdmin, (req, res) => {
