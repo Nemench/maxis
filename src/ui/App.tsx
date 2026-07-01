@@ -276,6 +276,10 @@ function MainApp({ currentUser, onLogout, branding, onBrandingChange }: { curren
             <h1>{tabTitle(tab)}</h1>
             <p>{tabSubtitle(tab)}</p>
           </div>
+          {/* Also reachable via .sidebar-footer on desktop, but that's hidden
+              on mobile/tablet breakpoints (≤920px) — this is the only sign-out
+              entry point on phones and the Android app, so it stays visible always. */}
+          <button className="icon-button" onClick={onLogout} title="Sign out"><LogOut size={18} /></button>
         </header>
 
         {message && <div className="toast">{message}</div>}
