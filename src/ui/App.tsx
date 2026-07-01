@@ -994,6 +994,11 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
     }
   };
 
+  const previewBatch = () => {
+    if (lines.length === 0) { setMsg("No lines to preview."); window.setTimeout(() => setMsg(""), 3000); return; }
+    printHtml(buildWeighInSummaryHtml(new Date().toISOString(), lines, products, "WEIGH-IN SUMMARY — PREVIEW"));
+  };
+
   const finalize = async () => {
     if (lines.length === 0) { setMsg("No lines to finalize."); return; }
     if (!window.confirm(`Finalize this batch of ${lines.length} line${lines.length === 1 ? "" : "s"}? Lines can no longer be edited once finalized.`)) return;
@@ -1094,12 +1099,13 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
           </tbody>
         </table>
         <footer className="actions">
+          <button type="button" className="secondary" onClick={previewBatch} disabled={lines.length === 0}><FileDown size={18} /> Preview</button>
           <button type="button" onClick={() => void finalize()} disabled={busy || lines.length === 0}><FileDown size={18} /> Finalize batch &amp; print</button>
         </footer>
       </div>
 
       {currentUser.role === "admin" && (
-        <div className="panel reports-panel">
+        <div className="panel reports-panel span-full">
           <h2>Weigh-in history</h2>
           <div className="report-controls">
             <label>From<input type="date" value={historyFrom} onChange={(e) => setHistoryFrom(e.target.value)} /></label>
@@ -1843,7 +1849,7 @@ function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function buildWeighInSummaryHtml(dateIso: string, lines: WeighInLine[], products: Product[]): string {
+function buildWeighInSummaryHtml(dateIso: string, lines: WeighInLine[], products: Product[], heading = "WEIGH-IN SUMMARY"): string {
   const siteName = esc(receiptBranding.siteName || "MAXIS");
   const logoUrl = receiptBranding.logoUrl ? `${window.location.origin}${receiptBranding.logoUrl}` : `${window.location.origin}/logo.jpg`;
   const { blue, blueDark } = deriveShades(/^#[0-9a-f]{6}$/i.test(receiptBranding.themeColor) ? receiptBranding.themeColor : "#1a47a0");
@@ -1852,7 +1858,8 @@ function buildWeighInSummaryHtml(dateIso: string, lines: WeighInLine[], products
 
   const productName = (id: number) => products.find((p) => p.id === id)?.name ?? "—";
 
-  // Section by supplier, then item+grade within each supplier, each section subtotaled
+  // Section by supplier; within each supplier, one row per item (grades merged into a list) so
+  // it's immediately clear how much of each item came from that supplier, each section subtotaled
   const bySupplier = new Map<number, { name: string; lines: WeighInLine[] }>();
   for (const l of lines) {
     const key = l.supplierId;
@@ -1863,17 +1870,17 @@ function buildWeighInSummaryHtml(dateIso: string, lines: WeighInLine[], products
   const supplierSections = [...bySupplier.values()]
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((supplier) => {
-      const itemGrades = new Map<string, { productName: string; grade: string; pieces: number; kg: number }>();
+      const items = new Map<number, { productName: string; grades: Set<string>; pieces: number; kg: number }>();
       for (const l of supplier.lines) {
-        const key = `${l.productId}|${l.grade}`;
-        const g = itemGrades.get(key) ?? { productName: l.productName ?? productName(l.productId), grade: l.grade, pieces: 0, kg: 0 };
-        g.pieces += l.piecesReceived;
-        g.kg += l.weightKg;
-        itemGrades.set(key, g);
+        const it = items.get(l.productId) ?? { productName: l.productName ?? productName(l.productId), grades: new Set<string>(), kg: 0, pieces: 0 };
+        for (const g of l.grade.split(",")) it.grades.add(g);
+        it.pieces += l.piecesReceived;
+        it.kg += l.weightKg;
+        items.set(l.productId, it);
       }
-      const rows = [...itemGrades.values()]
-        .sort((a, b) => a.productName.localeCompare(b.productName) || a.grade.localeCompare(b.grade))
-        .map((g) => `<tr><td>${esc(g.productName)}</td><td>${esc(g.grade)}</td><td>${g.pieces}</td><td>${g.kg.toFixed(2)}</td></tr>`)
+      const rows = [...items.values()]
+        .sort((a, b) => a.productName.localeCompare(b.productName))
+        .map((it) => `<tr><td>${esc(it.productName)}</td><td>${esc([...it.grades].sort().join(", "))}</td><td>${it.pieces}</td><td>${it.kg.toFixed(2)}</td></tr>`)
         .join("");
       const subPieces = supplier.lines.reduce((sum, l) => sum + l.piecesReceived, 0);
       const subKg = supplier.lines.reduce((sum, l) => sum + l.weightKg, 0);
@@ -1900,7 +1907,7 @@ function buildWeighInSummaryHtml(dateIso: string, lines: WeighInLine[], products
   const grandPieces = lines.reduce((sum, l) => sum + l.piecesReceived, 0);
   const grandKg = lines.reduce((sum, l) => sum + l.weightKg, 0);
 
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Weigh-In Summary — ${dateStr}</title><style>
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(heading)} — ${dateStr}</title><style>
 @page{size:A4;margin:0}*{box-sizing:border-box;margin:0;padding:0}
 body{font-family:Inter,'Segoe UI',Arial,sans-serif;font-size:13px;color:#1a1a2e;line-height:1.5;padding:18mm}
 .hdr{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:14px;border-bottom:3px solid ${blueDark};margin-bottom:20px}
@@ -1917,7 +1924,7 @@ tr:nth-child(even) td{background:#f8f9fc}
 .totals td{font-weight:800;border-top:2px solid ${blueDark};background:#fff}
 </style></head><body>
 <div class="hdr">
-  <div class="hdr-left"><div class="shop">${siteName}</div><div class="type">WEIGH-IN SUMMARY</div></div>
+  <div class="hdr-left"><div class="shop">${siteName}</div><div class="type">${esc(heading)}</div></div>
   <div class="hdr-right"><img class="logo" src="${logoUrl}" alt="${siteName}"><div class="dt">${dateStr}</div></div>
 </div>
 ${supplierSections}
