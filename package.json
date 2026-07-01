@@ -13,7 +13,9 @@
     "electron:preview": "npm run build && npx tsup && npx electron .",
     "cap:sync": "npm run build && npx cap sync android",
     "android:open": "npm run cap:sync && npx cap open android",
-    "android:assets": "npx capacitor-assets generate --android"
+    "android:assets": "npx capacitor-assets generate --android",
+    "branding:sync": "node scripts/sync-branding.mjs",
+    "android:rebrand": "npm run branding:sync && npm run android:assets && npm run cap:sync"
   },
   "keywords": [],
   "author": "",
@@ -55,6 +57,7 @@
     "electron-builder": "^25.0.0",
     "eslint": "^9.0.0",
     "eslint-plugin-react-hooks": "^5.0.0",
+    "sharp": "^0.35.3",
     "tsup": "^8.0.0",
     "typescript": "^5.8.0",
     "typescript-eslint": "^8.0.0",
