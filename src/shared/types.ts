@@ -79,6 +79,34 @@ export interface QuickCreateProductInput {
   department: Department;
 }
 
+// ── Stock locations ──────────────────────────────────────────────────────────
+// Physical places stock can sit (Cold Room, Counter, Freezer 2, ...). Every
+// product's stock is tracked per location (see ProductStockRow) rather than
+// as a single overall number — Product.onHandQty is the sum across all
+// locations, kept for anything that only needs the total.
+
+export interface StockLocation {
+  id: number;
+  name: string;
+  isActive: number;
+  createdAt: string;
+}
+
+// One product's quantity at one specific location — the unit the Stock Take
+// screen actually reads/writes. Nobody edits `qty` directly: entering a
+// physical count (see the count endpoint) computes and applies the delta
+// server-side, so there's no path to blindly overwrite the stored total.
+export interface ProductStockRow {
+  productId: number;
+  productName: string;
+  category: string;
+  locationId: number;
+  qty: number;
+  lastCountedAt: string | null;
+  lastCountedById: number | null;
+  lastCountedByName: string | null;
+}
+
 // ── Weigh-in (stock-taking) ──────────────────────────────────────────────────
 // A single grade, or a combined pair for pieces weighed together as one lot.
 // All three grades combined ("A,B,C") is intentionally not a valid value.
@@ -115,6 +143,7 @@ export interface WeighInLineInput {
   piecesReceived: number;
   weightKg: number;
   supplierId: number;
+  locationId: number;
 }
 
 export interface WeighInLine extends WeighInLineInput {
@@ -122,6 +151,7 @@ export interface WeighInLine extends WeighInLineInput {
   batchId: number;
   productName: string | null;
   supplierName: string | null;
+  locationName: string | null;
   createdById: number | null;
   createdByName: string | null;
   createdAt: string;

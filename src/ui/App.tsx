@@ -40,6 +40,8 @@ import type {
   OrderItemInput,
   Product,
   ProductInput,
+  ProductStockRow,
+  StockLocation,
   Supplier,
   User,
   UserInput,
@@ -325,7 +327,7 @@ function MainApp({ currentUser, onLogout, branding, onBrandingChange }: { curren
         {tab === "queue" && <Queue orders={activeOrders} currentUser={currentUser} onChanged={refresh} printStyle={printStyle} printerMap={printerMap} />}
         {tab === "history" && <HistoryView orders={historyOrders} printStyle={printStyle} printerMap={printerMap} />}
         {tab === "products" && currentUser.role === "admin" && <Products products={products} onChanged={refresh} />}
-        {tab === "stockTake" && (currentUser.role === "admin" || isStockTaker) && <StockTakePanel products={products} onChanged={refresh} />}
+        {tab === "stockTake" && (currentUser.role === "admin" || isStockTaker) && <StockTakePanel products={products} currentUser={currentUser} onChanged={refresh} />}
         {tab === "weighIn" && (currentUser.role === "admin" || isStockTaker) && <WeighInPanel products={products} currentUser={currentUser} onChanged={refresh} />}
         {tab === "users" && currentUser.role === "admin" && <UsersPanel />}
         {tab === "settings" && currentUser.role === "admin" && (
@@ -1080,18 +1082,42 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
 }
 
 // ── Stock take ────────────────────────────────────────────────────────────────
+// Physical stock counting, per location. Nobody types a new total directly —
+// everyone (admin included) enters what they physically counted, and the
+// server works out and applies the resulting change itself (see
+// db.recordStockCount). Admin additionally manages the list of locations.
 
-// Physical stock recount screen: one input per product to overwrite
-// onHandQty directly (as opposed to the incremental weigh-in deltas).
-function StockTakePanel({ products, onChanged }: { products: Product[]; onChanged: () => Promise<void> }) {
+function StockTakePanel({ products, currentUser, onChanged }: { products: Product[]; currentUser: User; onChanged: () => Promise<void> }) {
+  const [locations, setLocations] = useState<StockLocation[]>([]);
+  const [locationId, setLocationId] = useState<number | "">("");
+  const [rows, setRows] = useState<ProductStockRow[]>([]);
   const [msg, setMsg] = useState("");
+  const [newLocationName, setNewLocationName] = useState("");
+  const [addingLocation, setAddingLocation] = useState(false);
 
-  const submit = async (productId: number, value: string) => {
+  const loadLocations = () =>
+    api.stock.locations.list().then((locs) => {
+      setLocations(locs);
+      setLocationId((cur) => cur || locs[0]?.id || "");
+    }).catch(() => undefined);
+
+  useEffect(() => { void loadLocations(); }, []);
+
+  const loadRows = () => {
+    if (!locationId) { setRows([]); return; }
+    api.stock.forLocation(locationId).then(setRows).catch(() => undefined);
+  };
+
+  useEffect(() => { loadRows(); }, [locationId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const submitCount = async (productId: number, value: string) => {
+    if (!locationId || value === "") return;
     const qty = Number(value);
     if (Number.isNaN(qty) || qty < 0) return;
     try {
-      await api.stock.update(productId, qty);
-      setMsg("Stock count saved.");
+      await api.stock.recordCount(productId, locationId, qty);
+      setMsg("Count saved.");
+      loadRows();
       await onChanged();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : "Could not save count.");
@@ -1100,38 +1126,97 @@ function StockTakePanel({ products, onChanged }: { products: Product[]; onChange
     }
   };
 
+  const addLocation = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!newLocationName.trim()) return;
+    setAddingLocation(true);
+    try {
+      const loc = await api.stock.locations.create(newLocationName);
+      setNewLocationName("");
+      await loadLocations();
+      setLocationId(loc.id);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : "Could not add location.");
+    } finally {
+      setAddingLocation(false);
+    }
+  };
+
+  const removeLocation = async (id: number) => {
+    if (!window.confirm("Remove this location? Its stock history is kept, but it won't be countable against anymore.")) return;
+    await api.stock.locations.deactivate(id);
+    await loadLocations();
+  };
+
   if (products.length === 0) {
     return <EmptyState title="No items yet" detail="An admin needs to add items in Stock before they can be counted here." />;
   }
 
+  const thresholdByProductId = new Map(products.map((p) => [p.id, p.lowStockThreshold]));
+
   return (
-    <div className="panel table-panel">
-      <p className="settings-hint">Enter the current on-hand quantity for each item. This replaces the previous count.</p>
-      {msg && <div className="form-message">{msg}</div>}
-      <table>
-        <thead><tr><th>Name</th><th>Category</th><th>On hand</th><th>Threshold</th><th>Last counted</th></tr></thead>
-        <tbody>
-          {products.map((p) => {
-            const low = p.lowStockThreshold != null && p.onHandQty <= p.lowStockThreshold;
-            return (
-              <tr key={p.id}>
-                <td>{p.name}</td>
-                <td>{p.category}</td>
-                <td>
-                  <input
-                    type="number" min="0" step="0.01" defaultValue={p.onHandQty}
-                    key={`${p.id}-${p.onHandQty}`}
-                    onBlur={(e) => void submit(p.id, e.target.value)}
-                  />
-                  {low && <span className="low-stock-badge">Low</span>}
-                </td>
-                <td>{p.lowStockThreshold ?? "—"}</td>
-                <td className="settings-hint">{p.lastCountedAt ? new Date(p.lastCountedAt).toLocaleString(appSettings.locale, { dateStyle: "medium", timeStyle: "short" }) : "Never"}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+    <div className="products-layout">
+      {currentUser.role === "admin" && (
+        <form className="panel product-form" onSubmit={(e) => void addLocation(e)}>
+          <h2>Stock locations</h2>
+          <p className="settings-hint">The physical places stock is kept — Cold Room, Counter, Freezer 2, etc.</p>
+          <label>New location<input value={newLocationName} onChange={(e) => setNewLocationName(e.target.value)} placeholder="e.g. Cold Room" /></label>
+          <footer className="actions">
+            <button type="submit" disabled={addingLocation || !newLocationName.trim()}>{addingLocation ? "Adding…" : "Add location"}</button>
+          </footer>
+          {locations.length > 0 && (
+            <ul className="location-list">
+              {locations.map((l) => (
+                <li key={l.id}>
+                  <span>{l.name}</span>
+                  <button type="button" className="icon-button danger" title="Remove location" onClick={() => void removeLocation(l.id)}><Trash2 size={14} /></button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </form>
+      )}
+
+      <div className="panel table-panel span-full">
+        <div className="report-controls">
+          <label>Counting at
+            <select value={locationId} onChange={(e) => setLocationId(e.target.value ? Number(e.target.value) : "")}>
+              {locations.length === 0 && <option value="">— No locations yet —</option>}
+              {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+            </select>
+          </label>
+        </div>
+        <p className="settings-hint">Enter what you physically count for each item — the system works out and applies the change itself.</p>
+        {msg && <div className="form-message">{msg}</div>}
+        <table>
+          <thead><tr><th>Name</th><th>Category</th><th>Current</th><th>Count</th><th>Last counted</th></tr></thead>
+          <tbody>
+            {rows.map((r) => {
+              const threshold = thresholdByProductId.get(r.productId);
+              const low = threshold != null && r.qty <= threshold;
+              return (
+                <tr key={r.productId}>
+                  <td>{r.productName}</td>
+                  <td>{r.category}</td>
+                  <td>{r.qty}{low && <span className="low-stock-badge">Low</span>}</td>
+                  <td>
+                    <input
+                      type="number" min="0" step="0.01" placeholder="Count…"
+                      key={`${r.productId}-${locationId}-${r.qty}`}
+                      onBlur={(e) => void submitCount(r.productId, e.target.value)}
+                    />
+                  </td>
+                  <td className="settings-hint">
+                    {r.lastCountedAt
+                      ? `${new Date(r.lastCountedAt).toLocaleString(appSettings.locale, { dateStyle: "medium", timeStyle: "short" })}${r.lastCountedByName ? ` — ${r.lastCountedByName}` : ""}`
+                      : "Never"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -1163,6 +1248,8 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
   const [weightKg, setWeightKg] = useState("");
   const [supplierId, setSupplierId] = useState<number | "" | "new">("");
   const [newSupplierName, setNewSupplierName] = useState("");
+  const [locations, setLocations] = useState<StockLocation[]>([]);
+  const [locationId, setLocationId] = useState<number | "">("");
   const [busy, setBusy] = useState(false);
   const [cooldown, setCooldown] = useState(false);
   const [msg, setMsg] = useState("");
@@ -1174,6 +1261,11 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
 
   const loadCurrent = () => api.weighIn.current().then((r) => setLines(r.lines)).catch(() => undefined);
   const loadSuppliers = () => api.suppliers.list().then(setSuppliers).catch(() => undefined);
+  const loadLocations = () =>
+    api.stock.locations.list().then((locs) => {
+      setLocations(locs);
+      setLocationId((cur) => cur || locs[0]?.id || "");
+    }).catch(() => undefined);
   // Takes explicit from/to (defaulting to current state) rather than reading
   // historyFrom/historyTo directly, so the Clear button can pass "" for both
   // and refetch immediately without waiting on React's async state update
@@ -1186,7 +1278,7 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
       .then(setHistory).catch(() => undefined).finally(() => setHistoryLoading(false));
   };
 
-  useEffect(() => { void loadCurrent(); void loadSuppliers(); loadHistory(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { void loadCurrent(); void loadSuppliers(); void loadLocations(); loadHistory(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const printBatch = async (batchId: number) => {
     try {
@@ -1247,6 +1339,7 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
     setPieces(line.piecesReceived);
     setWeightKg(String(line.weightKg));
     setSupplierId(line.supplierId);
+    setLocationId(line.locationId);
     setNewSupplierName("");
     setMsg("");
   };
@@ -1289,6 +1382,7 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
     if (!pieces || pieces <= 0) { setMsg("Enter how many pieces were received."); return; }
     if (!weight || weight <= 0) { setMsg("Enter the weight in kg."); return; }
     if (supplierId === "" || (supplierId === "new" && !newSupplierName.trim())) { setMsg("Pick or add a supplier."); return; }
+    if (!locationId) { setMsg("Pick a location."); return; }
 
     const wasEditing = editingLineId;
     setBusy(true); setMsg("");
@@ -1304,7 +1398,7 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
         setNewSupplierName("");
       }
 
-      const input = { productId, grade, piecesReceived: pieces, weightKg: weight, supplierId: finalSupplierId as number };
+      const input = { productId, grade, piecesReceived: pieces, weightKg: weight, supplierId: finalSupplierId as number, locationId: locationId as number };
       if (wasEditing) {
         const updated = await api.weighIn.updateLine(wasEditing, input);
         setLines((cur) => cur.map((l) => (l.id === updated.id ? updated : l)));
@@ -1321,7 +1415,7 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
         // to remember to do later.
         const hindWeight = parseFloat(hindWeightKg);
         if (isWholeLamb(selectedProduct?.name) && lambHindProduct && hindPieces > 0 && hindWeight > 0) {
-          const hindLine = await api.weighIn.addLine({ productId: lambHindProduct.id, grade, piecesReceived: hindPieces, weightKg: hindWeight, supplierId: finalSupplierId as number });
+          const hindLine = await api.weighIn.addLine({ productId: lambHindProduct.id, grade, piecesReceived: hindPieces, weightKg: hindWeight, supplierId: finalSupplierId as number, locationId: locationId as number });
           newLines.push(hindLine);
         }
 
@@ -1433,6 +1527,13 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
         {supplierId === "new" && (
           <label>New supplier name<input value={newSupplierName} onChange={(e) => setNewSupplierName(e.target.value)} placeholder="Supplier name" /></label>
         )}
+        <label>
+          Location
+          <select value={locationId} onChange={(e) => setLocationId(e.target.value ? Number(e.target.value) : "")}>
+            <option value="">— Select location —</option>
+            {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+        </label>
         {msg && <div className="form-message">{msg}</div>}
         <footer className="actions">
           {editingLineId && <button type="button" className="secondary danger" onClick={() => void deleteLine()} disabled={busy}>Delete line</button>}
@@ -1446,7 +1547,7 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
       <div className="panel table-panel">
         <h2>Current batch</h2>
         <table>
-          <thead><tr><th>Date</th><th>Item</th><th>Grade</th><th>Pieces</th><th>Kg</th><th>Supplier</th><th></th></tr></thead>
+          <thead><tr><th>Date</th><th>Item</th><th>Grade</th><th>Pieces</th><th>Kg</th><th>Supplier</th><th>Location</th><th></th></tr></thead>
           <tbody>
             {lines.map((l) => (
               <tr key={l.id} className={l.id === editingLineId ? "editing-row" : ""}>
@@ -1456,13 +1557,14 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
                 <td>{l.piecesReceived}</td>
                 <td>{l.weightKg}</td>
                 <td>{l.supplierName}</td>
+                <td>{l.locationName}</td>
                 <td className="row-actions">
                   <button type="button" className="secondary sm" onClick={() => startEdit(l)}>Edit</button>
                 </td>
               </tr>
             ))}
             {lines.length > 0 && (
-              <tr className="totals-row"><td colSpan={3}><b>Total</b></td><td><b>{totals.pieces}</b></td><td><b>{totals.weightKg.toFixed(2)}</b></td><td></td><td></td></tr>
+              <tr className="totals-row"><td colSpan={3}><b>Total</b></td><td><b>{totals.pieces}</b></td><td><b>{totals.weightKg.toFixed(2)}</b></td><td></td><td></td><td></td></tr>
             )}
           </tbody>
         </table>

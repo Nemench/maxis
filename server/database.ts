@@ -12,7 +12,8 @@ import type {
   Order, OrderItem, OrderItemInput, CreateOrderInput, OrderStatus,
   User, UserInput,
   Department, DeptStatus, DeliveryAddress,
-  Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput
+  Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput,
+  StockLocation, ProductStockRow
 } from "../src/shared/types.js";
 
 export class KotDatabase {
@@ -94,10 +95,24 @@ export class KotDatabase {
   }
 
   // ── Products ───────────────────────────────────────────────────────────────
+  // onHandQty is derived (SUM across every location in product_stock), not a
+  // column anyone writes to directly — see the "Stock locations" section
+  // below for where the real per-location numbers live and how they change.
+  // Product.lastCountedAt/lastCountedById are legacy (pre-dating per-location
+  // tracking) and no longer updated; the authoritative per-location count
+  // timestamp/user lives on each product_stock row instead.
 
   listProducts(): Product[] {
     return this.db
-      .prepare("SELECT id, name, category, unitDefault, pricePerUnit, prepNotes, department, isActive, lowStockThreshold, onHandQty, lastCountedAt, lastCountedById, barcode, isRawIntake, createdAt, updatedAt FROM products WHERE isActive = 1 ORDER BY category, name")
+      .prepare(`
+        SELECT p.id, p.name, p.category, p.unitDefault, p.pricePerUnit, p.prepNotes, p.department, p.isActive,
+               p.lowStockThreshold, COALESCE(SUM(ps.qty), 0) as onHandQty, p.lastCountedAt, p.lastCountedById,
+               p.barcode, p.isRawIntake, p.createdAt, p.updatedAt
+        FROM products p
+        LEFT JOIN product_stock ps ON ps.productId = p.id
+        WHERE p.isActive = 1
+        GROUP BY p.id
+        ORDER BY p.category, p.name`)
       .all() as Product[];
   }
 
@@ -144,26 +159,102 @@ export class KotDatabase {
     });
   }
 
-  // Sets on-hand quantity directly — a physical recount from the Stock Take screen.
-  updateStock(productId: number, onHandQty: number, countedById: number): Product {
-    const now = new Date().toISOString();
-    this.db
-      .prepare("UPDATE products SET onHandQty=?, lastCountedAt=?, lastCountedById=?, updatedAt=? WHERE id=?")
-      .run(onHandQty, now, countedById, now, productId);
-    return this.db.prepare("SELECT * FROM products WHERE id = ?").get(productId) as Product;
-  }
-
-  // Applies an incremental change (e.g. +pieces from a weigh-in line, or the
-  // negative of that when a line is edited/deleted). Clamped at 0 so a bad
-  // delta can never push stock negative.
-  adjustStock(productId: number, delta: number): void {
-    this.db.prepare("UPDATE products SET onHandQty = MAX(0, onHandQty + ?), updatedAt = ? WHERE id = ?").run(delta, new Date().toISOString(), productId);
-  }
-
   listLowStock(): Product[] {
     return this.db
-      .prepare("SELECT id, name, category, unitDefault, pricePerUnit, prepNotes, department, isActive, lowStockThreshold, onHandQty, lastCountedAt, lastCountedById, createdAt, updatedAt FROM products WHERE isActive = 1 AND lowStockThreshold IS NOT NULL AND onHandQty <= lowStockThreshold ORDER BY name")
+      .prepare(`
+        SELECT p.id, p.name, p.category, p.unitDefault, p.pricePerUnit, p.prepNotes, p.department, p.isActive,
+               p.lowStockThreshold, COALESCE(SUM(ps.qty), 0) as onHandQty, p.lastCountedAt, p.lastCountedById,
+               p.barcode, p.isRawIntake, p.createdAt, p.updatedAt
+        FROM products p
+        LEFT JOIN product_stock ps ON ps.productId = p.id
+        WHERE p.isActive = 1 AND p.lowStockThreshold IS NOT NULL
+        GROUP BY p.id
+        HAVING onHandQty <= p.lowStockThreshold
+        ORDER BY p.name`)
       .all() as Product[];
+  }
+
+  // ── Stock locations ────────────────────────────────────────────────────────
+  // Physical places stock sits (Cold Room, Counter, ...). Every product's
+  // stock is tracked per location — nobody edits a location's quantity
+  // directly; recordStockCount() below is the only write path, and it always
+  // computes the change from a physically-observed count rather than
+  // accepting an arbitrary "new total" from the client.
+
+  listStockLocations(): StockLocation[] {
+    return this.db.prepare("SELECT * FROM stock_locations WHERE isActive = 1 ORDER BY name").all() as StockLocation[];
+  }
+
+  createStockLocation(name: string): StockLocation {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error("Location name is required");
+    const now = new Date().toISOString();
+    this.db.prepare("INSERT OR IGNORE INTO stock_locations (name, isActive, createdAt) VALUES (?, 1, ?)").run(trimmed, now);
+    return this.db.prepare("SELECT * FROM stock_locations WHERE name = ? COLLATE NOCASE").get(trimmed) as StockLocation;
+  }
+
+  deactivateStockLocation(id: number): void {
+    this.db.prepare("UPDATE stock_locations SET isActive = 0 WHERE id = ?").run(id);
+  }
+
+  // Every active product's quantity at one location — a LEFT JOIN so a
+  // product with no product_stock row yet (never counted here) still shows
+  // up with qty 0, rather than being missing from the list entirely.
+  listProductStockForLocation(locationId: number): ProductStockRow[] {
+    return this.db
+      .prepare(`
+        SELECT p.id as productId, p.name as productName, p.category, ? as locationId,
+               COALESCE(ps.qty, 0) as qty, ps.lastCountedAt, ps.lastCountedById, u.name as lastCountedByName
+        FROM products p
+        LEFT JOIN product_stock ps ON ps.productId = p.id AND ps.locationId = ?
+        LEFT JOIN users u ON ps.lastCountedById = u.id
+        WHERE p.isActive = 1
+        ORDER BY p.category, p.name`)
+      .all(locationId, locationId) as ProductStockRow[];
+  }
+
+  private getProductStockRow(productId: number, locationId: number): ProductStockRow {
+    return this.db
+      .prepare(`
+        SELECT p.id as productId, p.name as productName, p.category, ps.locationId,
+               ps.qty, ps.lastCountedAt, ps.lastCountedById, u.name as lastCountedByName
+        FROM product_stock ps
+        JOIN products p ON p.id = ps.productId
+        LEFT JOIN users u ON ps.lastCountedById = u.id
+        WHERE ps.productId = ? AND ps.locationId = ?`)
+      .get(productId, locationId) as ProductStockRow;
+  }
+
+  // Applies a relative change to one product's quantity at one location
+  // (e.g. +pieces from a weigh-in line, or the negative of that when a line
+  // is edited/deleted). Clamped at 0. This is the low-level primitive —
+  // recordStockCount below is what the Stock Take screen actually calls.
+  adjustProductStock(productId: number, locationId: number, delta: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(`
+        INSERT INTO product_stock (productId, locationId, qty, updatedAt) VALUES (?, ?, MAX(0, ?), ?)
+        ON CONFLICT(productId, locationId) DO UPDATE SET qty = MAX(0, product_stock.qty + ?), updatedAt = ?`)
+      .run(productId, locationId, delta, now, delta, now);
+  }
+
+  // The only way stock at a location actually changes from the Stock Take
+  // screen: given what someone physically counted, compute the delta from
+  // the current stored quantity and apply it — same as any other
+  // adjustment, just derived from an observation instead of typed directly.
+  // Available to every role that can access Stock Take (including admin —
+  // there's deliberately no separate "just set it to X" path for anyone).
+  recordStockCount(productId: number, locationId: number, countedQty: number, countedById: number): ProductStockRow {
+    if (countedQty < 0) throw new Error("Counted quantity can't be negative");
+    const now = new Date().toISOString();
+    const current = this.getProductStockRow(productId, locationId);
+    const delta = countedQty - (current?.qty ?? 0);
+    this.db
+      .prepare(`
+        INSERT INTO product_stock (productId, locationId, qty, lastCountedAt, lastCountedById, updatedAt) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(productId, locationId) DO UPDATE SET qty = product_stock.qty + ?, lastCountedAt = ?, lastCountedById = ?, updatedAt = ?`)
+      .run(productId, locationId, Math.max(0, countedQty), now, countedById, now, delta, now, countedById, now);
+    return this.getProductStockRow(productId, locationId);
   }
 
   // ── Suppliers ──────────────────────────────────────────────────────────────
@@ -223,26 +314,28 @@ export class KotDatabase {
       const batch = this.getOpenBatch() ?? this.createBatch(createdById);
       const now = new Date().toISOString();
       const result = this.db
-        .prepare("INSERT INTO weigh_in_lines (batchId, productId, grade, piecesReceived, weightKg, supplierId, createdById, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(batch.id, input.productId, input.grade, input.piecesReceived, input.weightKg, input.supplierId, createdById, now);
-      this.adjustStock(input.productId, input.piecesReceived);
+        .prepare("INSERT INTO weigh_in_lines (batchId, productId, grade, piecesReceived, weightKg, supplierId, locationId, createdById, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(batch.id, input.productId, input.grade, input.piecesReceived, input.weightKg, input.supplierId, input.locationId, createdById, now);
+      this.adjustProductStock(input.productId, input.locationId, input.piecesReceived);
       return Number(result.lastInsertRowid);
     });
     const id = add();
     return this.db
-      .prepare(`SELECT l.*, p.name as productName, s.name as supplierName, u.name as createdByName
+      .prepare(`SELECT l.*, p.name as productName, s.name as supplierName, loc.name as locationName, u.name as createdByName
                 FROM weigh_in_lines l
                 LEFT JOIN products p ON l.productId = p.id
                 LEFT JOIN suppliers s ON l.supplierId = s.id
+                LEFT JOIN stock_locations loc ON l.locationId = loc.id
                 LEFT JOIN users u ON l.createdById = u.id
                 WHERE l.id = ?`)
       .get(id) as WeighInLine;
   }
 
   // Edits an existing line (only while its batch is still open). Stock is
-  // reconciled by reversing the old delta and applying the new one, which
-  // correctly handles a product/pieces change in one step without needing
-  // a separate "diff" calculation.
+  // reconciled by reversing the old delta at its old location, then applying
+  // the new one at the (possibly different) new location — correctly
+  // handles a product/location/pieces change in one step without needing a
+  // separate "diff" calculation.
   updateWeighInLine(id: number, input: WeighInLineInput): WeighInLine {
     const update = this.db.transaction(() => {
       const existing = this.db
@@ -251,20 +344,21 @@ export class KotDatabase {
       if (!existing) throw new Error(`Weigh-in line ${id} not found`);
       if (existing.batchStatus !== "open") throw new Error("Cannot edit a line in a finalized batch");
 
-      // Reverse the old line's stock impact, then apply the new one — handles product changes too
-      this.adjustStock(existing.productId, -existing.piecesReceived);
-      this.adjustStock(input.productId, input.piecesReceived);
+      // Reverse the old line's stock impact, then apply the new one — handles product/location changes too
+      this.adjustProductStock(existing.productId, existing.locationId, -existing.piecesReceived);
+      this.adjustProductStock(input.productId, input.locationId, input.piecesReceived);
 
       this.db
-        .prepare("UPDATE weigh_in_lines SET productId=?, grade=?, piecesReceived=?, weightKg=?, supplierId=? WHERE id=?")
-        .run(input.productId, input.grade, input.piecesReceived, input.weightKg, input.supplierId, id);
+        .prepare("UPDATE weigh_in_lines SET productId=?, grade=?, piecesReceived=?, weightKg=?, supplierId=?, locationId=? WHERE id=?")
+        .run(input.productId, input.grade, input.piecesReceived, input.weightKg, input.supplierId, input.locationId, id);
     });
     update();
     return this.db
-      .prepare(`SELECT l.*, p.name as productName, s.name as supplierName, u.name as createdByName
+      .prepare(`SELECT l.*, p.name as productName, s.name as supplierName, loc.name as locationName, u.name as createdByName
                 FROM weigh_in_lines l
                 LEFT JOIN products p ON l.productId = p.id
                 LEFT JOIN suppliers s ON l.supplierId = s.id
+                LEFT JOIN stock_locations loc ON l.locationId = loc.id
                 LEFT JOIN users u ON l.createdById = u.id
                 WHERE l.id = ?`)
       .get(id) as WeighInLine;
@@ -279,7 +373,7 @@ export class KotDatabase {
       if (!existing) throw new Error(`Weigh-in line ${id} not found`);
       if (existing.batchStatus !== "open") throw new Error("Cannot delete a line in a finalized batch");
 
-      this.adjustStock(existing.productId, -existing.piecesReceived);
+      this.adjustProductStock(existing.productId, existing.locationId, -existing.piecesReceived);
       this.db.prepare("DELETE FROM weigh_in_lines WHERE id = ?").run(id);
     })();
   }
@@ -287,10 +381,11 @@ export class KotDatabase {
   // With a batchId: every line in that batch, oldest first (matches entry order).
   // Without one: most recent lines across all batches, for general auditing.
   listWeighInLines(batchId?: number, limit = 500): WeighInLine[] {
-    const base = `SELECT l.*, p.name as productName, s.name as supplierName, u.name as createdByName
+    const base = `SELECT l.*, p.name as productName, s.name as supplierName, loc.name as locationName, u.name as createdByName
                   FROM weigh_in_lines l
                   LEFT JOIN products p ON l.productId = p.id
                   LEFT JOIN suppliers s ON l.supplierId = s.id
+                  LEFT JOIN stock_locations loc ON l.locationId = loc.id
                   LEFT JOIN users u ON l.createdById = u.id`;
     if (batchId != null) {
       return this.db.prepare(`${base} WHERE l.batchId = ? ORDER BY l.createdAt ASC`).all(batchId) as WeighInLine[];
@@ -374,6 +469,8 @@ export class KotDatabase {
     const suppliers = this.db.prepare("SELECT * FROM suppliers").all();
     const weighInBatches = this.db.prepare("SELECT * FROM weigh_in_batches").all();
     const weighInLines = this.db.prepare("SELECT * FROM weigh_in_lines").all();
+    const stockLocations = this.db.prepare("SELECT * FROM stock_locations").all();
+    const productStock = this.db.prepare("SELECT * FROM product_stock").all();
     const settings = this.db.prepare("SELECT key, value FROM settings").all() as { key: string; value: string }[];
     return {
       version: 1,
@@ -385,6 +482,8 @@ export class KotDatabase {
       suppliers,
       weighInBatches,
       weighInLines,
+      stockLocations,
+      productStock,
       settings: Object.fromEntries(settings.map((s) => [s.key, s.value]))
     };
   }
@@ -403,13 +502,15 @@ export class KotDatabase {
     const suppliers = (data.suppliers as Record<string, unknown>[]) ?? [];
     const weighInBatches = (data.weighInBatches as Record<string, unknown>[]) ?? [];
     const weighInLines = (data.weighInLines as Record<string, unknown>[]) ?? [];
+    const stockLocations = (data.stockLocations as Record<string, unknown>[]) ?? [];
+    const productStock = (data.productStock as Record<string, unknown>[]) ?? [];
     const settings = (data.settings as Record<string, string>) ?? {};
 
     // FK must be disabled outside transactions in SQLite
     this.db.exec("PRAGMA foreign_keys = OFF");
     try {
       this.db.transaction(() => {
-        this.db.exec("DELETE FROM weigh_in_lines; DELETE FROM weigh_in_batches; DELETE FROM suppliers; DELETE FROM order_items; DELETE FROM orders; DELETE FROM products; DELETE FROM users;");
+        this.db.exec("DELETE FROM product_stock; DELETE FROM stock_locations; DELETE FROM weigh_in_lines; DELETE FROM weigh_in_batches; DELETE FROM suppliers; DELETE FROM order_items; DELETE FROM orders; DELETE FROM products; DELETE FROM users;");
         for (const u of users) {
           this.db.prepare("INSERT INTO users (id,name,pin,role,department,isActive,createdAt) VALUES (?,?,?,?,?,?,?)")
             .run(u.id ?? null, u.name, u.pin, u.role, u.department ?? null, u.isActive ?? 1, u.createdAt);
@@ -427,8 +528,12 @@ export class KotDatabase {
         for (const s of suppliers) insSupplier.run(s.id,s.name,s.isActive??1,s.createdAt);
         const insBatch = this.db.prepare("INSERT INTO weigh_in_batches (id,status,createdById,createdAt,finalizedAt) VALUES (?,?,?,?,?)");
         for (const b of weighInBatches) insBatch.run(b.id,b.status,b.createdById??null,b.createdAt,b.finalizedAt??null);
-        const insLine = this.db.prepare("INSERT INTO weigh_in_lines (id,batchId,productId,grade,piecesReceived,weightKg,supplierId,createdById,createdAt) VALUES (?,?,?,?,?,?,?,?,?)");
-        for (const l of weighInLines) insLine.run(l.id,l.batchId,l.productId,l.grade,l.piecesReceived,l.weightKg,l.supplierId??null,l.createdById??null,l.createdAt);
+        const insLoc = this.db.prepare("INSERT INTO stock_locations (id,name,isActive,createdAt) VALUES (?,?,?,?)");
+        for (const loc of stockLocations) insLoc.run(loc.id,loc.name,loc.isActive??1,loc.createdAt);
+        const insLine = this.db.prepare("INSERT INTO weigh_in_lines (id,batchId,productId,grade,piecesReceived,weightKg,supplierId,locationId,createdById,createdAt) VALUES (?,?,?,?,?,?,?,?,?,?)");
+        for (const l of weighInLines) insLine.run(l.id,l.batchId,l.productId,l.grade,l.piecesReceived,l.weightKg,l.supplierId??null,l.locationId??null,l.createdById??null,l.createdAt);
+        const insPStock = this.db.prepare("INSERT INTO product_stock (productId,locationId,qty,lastCountedAt,lastCountedById,updatedAt) VALUES (?,?,?,?,?,?)");
+        for (const ps of productStock) insPStock.run(ps.productId,ps.locationId,ps.qty??0,ps.lastCountedAt??null,ps.lastCountedById??null,ps.updatedAt??now);
         for (const [key, value] of Object.entries(settings)) {
           this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, value);
         }
@@ -702,6 +807,20 @@ export class KotDatabase {
       }
     }
 
+    // Add locationId to weigh_in_lines if missing (existing databases) — nullable,
+    // since historical lines predate per-location tracking and never had one.
+    const weighInLinesExists = (this.db.prepare("SELECT COUNT(*) as n FROM sqlite_master WHERE type='table' AND name='weigh_in_lines'").get() as { n: number }).n > 0;
+    if (weighInLinesExists) {
+      const wilCols = (this.db.prepare("PRAGMA table_info(weigh_in_lines)").all() as { name: string }[]).map((c) => c.name);
+      if (!wilCols.includes("locationId")) this.db.exec("ALTER TABLE weigh_in_lines ADD COLUMN locationId INTEGER REFERENCES stock_locations(id)");
+    }
+
+    // Needed before the CREATE TABLE below runs (which would otherwise make
+    // product_stock exist unconditionally) — decides whether the one-time
+    // "migrate onHandQty into a default location" step at the bottom of this
+    // method should run.
+    const hadProductStock = (this.db.prepare("SELECT COUNT(*) as n FROM sqlite_master WHERE type='table' AND name='product_stock'").get() as { n: number }).n > 0;
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -792,8 +911,26 @@ export class KotDatabase {
         piecesReceived REAL NOT NULL,
         weightKg REAL NOT NULL,
         supplierId INTEGER REFERENCES suppliers(id),
+        locationId INTEGER REFERENCES stock_locations(id),
         createdById INTEGER REFERENCES users(id),
         createdAt TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS stock_locations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        isActive INTEGER NOT NULL DEFAULT 1,
+        createdAt TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS product_stock (
+        productId INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        locationId INTEGER NOT NULL REFERENCES stock_locations(id) ON DELETE CASCADE,
+        qty REAL NOT NULL DEFAULT 0,
+        lastCountedAt TEXT,
+        lastCountedById INTEGER REFERENCES users(id),
+        updatedAt TEXT NOT NULL,
+        PRIMARY KEY (productId, locationId)
       );
 
       CREATE INDEX IF NOT EXISTS idx_oi_orderId    ON order_items(orderId);
@@ -803,8 +940,28 @@ export class KotDatabase {
       CREATE INDEX IF NOT EXISTS idx_wil_batchId   ON weigh_in_lines(batchId);
       CREATE INDEX IF NOT EXISTS idx_wil_createdAt ON weigh_in_lines(createdAt DESC);
       CREATE INDEX IF NOT EXISTS idx_wib_status    ON weigh_in_batches(status);
+      CREATE INDEX IF NOT EXISTS idx_pstock_location ON product_stock(locationId);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_prod_barcode ON products(barcode) WHERE barcode IS NOT NULL;
     `);
+
+    // One-time migration for databases that predate per-location stock
+    // tracking: create a default "Main" location and move each product's
+    // existing onHandQty total into it, so nothing is lost — the admin can
+    // split it across real locations afterward via ordinary stock counts.
+    // Skipped entirely on a fresh install (seed() sets up locations itself).
+    if (!hadProductStock) {
+      const { count } = this.db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
+      if (count > 0) {
+        const now = new Date().toISOString();
+        this.db.prepare("INSERT OR IGNORE INTO stock_locations (name, isActive, createdAt) VALUES ('Main', 1, ?)").run(now);
+        const main = this.db.prepare("SELECT id FROM stock_locations WHERE name = 'Main' COLLATE NOCASE").get() as { id: number };
+        const productsWithStock = this.db.prepare("SELECT id, onHandQty, lastCountedAt, lastCountedById FROM products WHERE onHandQty > 0").all() as { id: number; onHandQty: number; lastCountedAt: string | null; lastCountedById: number | null }[];
+        const insStock = this.db.prepare("INSERT OR IGNORE INTO product_stock (productId, locationId, qty, lastCountedAt, lastCountedById, updatedAt) VALUES (?, ?, ?, ?, ?, ?)");
+        for (const p of productsWithStock) {
+          insStock.run(p.id, main.id, p.onHandQty, p.lastCountedAt, p.lastCountedById, now);
+        }
+      }
+    }
 
     // Seed default settings
     this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('autoPrint', 'false')").run();
@@ -863,5 +1020,9 @@ export class KotDatabase {
     for (const name of ["Whole Forequarter", "Liver", "Lungs", "Oxtail", "Whole Lamb", "Lamb Hind"]) {
       insIntake.run(name, now, now);
     }
+
+    // A starting location so Weigh-In/Stock Take aren't empty on day one —
+    // admin can rename it or add more via Settings.
+    this.db.prepare("INSERT INTO stock_locations (name, isActive, createdAt) VALUES ('Main', 1, ?)").run(now);
   }
 }

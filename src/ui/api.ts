@@ -2,7 +2,7 @@
 // req()/download(), which attach the JWT and centrally handle a 401 (token
 // missing/expired) by clearing it and forcing a reload back to the login screen.
 import { Capacitor } from "@capacitor/core";
-import type { User, UserInput, Product, ProductInput, QuickCreateProductInput, Order, OrderItemInput, CreateOrderInput, OrderStatus, Department, DeptStatus, Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput } from "../shared/types";
+import type { User, UserInput, Product, ProductInput, QuickCreateProductInput, Order, OrderItemInput, CreateOrderInput, OrderStatus, Department, DeptStatus, Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput, StockLocation, ProductStockRow } from "../shared/types";
 import { tokenStorage } from "./tokenStorage";
 import { NATIVE_SERVER_URL } from "../shared/nativeServer";
 
@@ -109,7 +109,16 @@ export const api = {
   stock: {
     list: () => req<Product[]>("GET", "/stock"),
     low: () => req<Product[]>("GET", "/stock/low"),
-    update: (productId: number, onHandQty: number) => req<Product>("PUT", `/stock/${productId}`, { onHandQty })
+    forLocation: (locationId: number) => req<ProductStockRow[]>("GET", `/stock/location/${locationId}`),
+    // Records what was physically counted — the server computes the delta
+    // from the stored quantity itself, there's no "set to X" call anywhere.
+    recordCount: (productId: number, locationId: number, countedQty: number) =>
+      req<ProductStockRow>("PUT", `/stock/${productId}`, { locationId, countedQty }),
+    locations: {
+      list: () => req<StockLocation[]>("GET", "/stock/locations"),
+      create: (name: string) => req<StockLocation>("POST", "/stock/locations", { name }),
+      deactivate: (id: number) => req<{ success: boolean }>("DELETE", `/stock/locations/${id}`)
+    }
   },
   suppliers: {
     list: () => req<Supplier[]>("GET", "/suppliers"),

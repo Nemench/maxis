@@ -20,6 +20,7 @@ function validateLineInput(input: WeighInLineInput): string | null {
   if (!GRADES.includes(input.grade)) return "grade must be 'A', 'B', 'C', or a pair like 'A,B'";
   if (typeof input.piecesReceived !== "number" || input.piecesReceived <= 0) return "piecesReceived must be a positive number";
   if (typeof input.weightKg !== "number" || input.weightKg <= 0) return "weightKg must be a positive number";
+  if (!input.locationId) return "locationId is required";
   return null;
 }
 
