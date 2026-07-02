@@ -54,7 +54,7 @@ type Tab = "orders" | "queue" | "history" | "products" | "users" | "settings" | 
 
 const deptStatusFlow: DeptStatus[] = ["New", "Received", "Ready", "Done"];
 const emptyLine: OrderItemInput = { productId: null, name: "", kg: null, quantity: null, notes: "", unitPrice: null, lineTotal: null, department: "counter" };
-const EMPTY_PRODUCT: ProductInput = { name: "", category: "", unitDefault: "kg", pricePerUnit: null, prepNotes: "", department: "counter", lowStockThreshold: null, barcode: null };
+const EMPTY_PRODUCT: ProductInput = { name: "", category: "", unitDefault: "kg", pricePerUnit: null, prepNotes: "", department: "counter", lowStockThreshold: null, barcode: null, isRawIntake: 0 };
 
 const currency = new Intl.NumberFormat(appSettings.locale, { style: "currency", currency: appSettings.currency });
 
@@ -1036,6 +1036,10 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
           Low-stock threshold
           <input type="number" min="0" step="0.01" placeholder="No warning" value={editing.lowStockThreshold ?? ""} onChange={(e) => setEditing({ ...editing, lowStockThreshold: e.target.value ? Number(e.target.value) : null })} />
         </label>
+        <label className="checkbox-label">
+          <input type="checkbox" checked={!!editing.isRawIntake} onChange={(e) => setEditing({ ...editing, isRawIntake: e.target.checked ? 1 : 0 })} />
+          Raw meat intake item <span className="optional-hint">(shows up in Weigh-In — whole carcass/organ items only, e.g. Whole Forequarter, Liver, Oxtail)</span>
+        </label>
         {stockMessage && <div className="form-message">{stockMessage}</div>}
         <footer className="actions">
           {editing.id && <button type="button" className="secondary" onClick={() => { setEditing(EMPTY_PRODUCT); setStockMessage(""); }}>Cancel</button>}
@@ -1139,9 +1143,14 @@ function StockTakePanel({ products, onChanged }: { products: Product[]; onChange
 
 const GRADE_LETTERS: ("A" | "B" | "C")[] = ["A", "B", "C"];
 // Per-item defaults for "pieces received", matched by exact lowercased name;
-// anything not listed falls back to 2 (defaultPiecesFor's `|| 2`).
-const ITEM_PIECE_DEFAULTS: Record<string, number> = { "beef forequarter": 2, "whole lamb": 8 };
+// anything not listed falls back to 2 (defaultPiecesFor's `|| 2`). Both
+// "Whole Forequarter" and "Beef Forequarter" are listed since existing
+// installs may have named the product either way (see the migration in
+// database.ts that flags pre-existing products as raw intake by name).
+const ITEM_PIECE_DEFAULTS: Record<string, number> = { "whole forequarter": 2, "beef forequarter": 2, "whole lamb": 8 };
 const defaultPiecesFor = (name: string | undefined) => (name && ITEM_PIECE_DEFAULTS[name.trim().toLowerCase()]) || 2;
+const isWholeLamb = (name: string | undefined) => (name ?? "").trim().toLowerCase() === "whole lamb";
+const isLambHind = (name: string | undefined) => (name ?? "").trim().toLowerCase() === "lamb hind";
 
 // Log-received-stock form + current in-progress batch table + (admin-only)
 // finalized-batch history with a printable summary per batch.
@@ -1194,18 +1203,29 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
     [lines]
   );
 
-  // Beef Forequarter and Whole Lamb are the highest-volume items — always
-  // pin them first (in that order) in the Item dropdown, ahead of the rest
-  // in their normal catalog order, regardless of how many other items exist.
+  // Only the whole-carcass/organ items the butchery actually takes delivery
+  // of are selectable here — everything else is received some other way.
+  // Whole Forequarter/Beef Forequarter and Whole Lamb are the highest-volume
+  // items, so they're always pinned first (in that order) ahead of the rest.
+  // Lamb Hind is deliberately left out of this list — it's logged via the
+  // "Also log Lamb Hind" co-entry below when Whole Lamb is selected, not
+  // picked as its own item, so it can't accidentally be logged on its own
+  // disconnected from the lamb delivery it came with.
+  const rawIntakeProducts = useMemo(() => products.filter((p) => p.isRawIntake && !isLambHind(p.name)), [products]);
+  const lambHindProduct = useMemo(() => products.find((p) => p.isRawIntake && isLambHind(p.name)), [products]);
   const orderedItemOptions = useMemo(() => {
     const pinnedNames = Object.keys(ITEM_PIECE_DEFAULTS);
     const byLowerName = (n: string) => n.trim().toLowerCase();
     const pinned = pinnedNames
-      .map((name) => products.find((p) => byLowerName(p.name) === name))
+      .map((name) => rawIntakeProducts.find((p) => byLowerName(p.name) === name))
       .filter((p): p is Product => Boolean(p));
     const pinnedIds = new Set(pinned.map((p) => p.id));
-    return [...pinned, ...products.filter((p) => !pinnedIds.has(p.id))];
-  }, [products]);
+    return [...pinned, ...rawIntakeProducts.filter((p) => !pinnedIds.has(p.id))];
+  }, [rawIntakeProducts]);
+
+  const selectedProduct = products.find((p) => p.id === productId);
+  const [hindPieces, setHindPieces] = useState(1);
+  const [hindWeightKg, setHindWeightKg] = useState("");
 
   const toggleGrade = (g: "A" | "B" | "C") =>
     setGrades((cur) => {
@@ -1234,6 +1254,7 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
   const cancelEdit = () => {
     setEditingLineId(null);
     setProductId(""); setGrades({ A: false, B: false, C: false }); setPieces(2); setWeightKg("");
+    setHindPieces(1); setHindWeightKg("");
     setMsg("");
   };
 
@@ -1292,10 +1313,23 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
         setMsg("Line updated.");
       } else {
         const line = await api.weighIn.addLine(input);
-        setLines((cur) => [...cur, line]);
+        const newLines = [line];
+
+        // Whole Lamb's hind is sold on as-is, never processed — logged as
+        // its own separate line (same grade/supplier as the lamb it came
+        // with) right alongside it, rather than as a follow-up someone has
+        // to remember to do later.
+        const hindWeight = parseFloat(hindWeightKg);
+        if (isWholeLamb(selectedProduct?.name) && lambHindProduct && hindPieces > 0 && hindWeight > 0) {
+          const hindLine = await api.weighIn.addLine({ productId: lambHindProduct.id, grade, piecesReceived: hindPieces, weightKg: hindWeight, supplierId: finalSupplierId as number });
+          newLines.push(hindLine);
+        }
+
+        setLines((cur) => [...cur, ...newLines]);
         // Item and grade stay selected as defaults for the next line — only weight/pieces reset
         setPieces(defaultPiecesFor(products.find((p) => p.id === productId)?.name)); setWeightKg("");
-        setMsg("Logged.");
+        setHindPieces(1); setHindWeightKg("");
+        setMsg(newLines.length > 1 ? "Logged (with Lamb Hind)." : "Logged.");
       }
       setSupplierId(finalSupplierId);
       await onChanged();
@@ -1371,6 +1405,23 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
           Weight (kg)
           <input type="number" inputMode="decimal" min="0" step="0.01" value={weightKg} onChange={(e) => setWeightKg(e.target.value)} placeholder="0.00" />
         </label>
+        {!editingLineId && isWholeLamb(selectedProduct?.name) && lambHindProduct && (
+          <div className="hind-coentry">
+            <p className="settings-hint">Also log the Lamb Hind from this delivery (sold on as-is, not processed) — same grade &amp; supplier as above.</p>
+            <label>
+              Hind pieces
+              <div className="stepper-row">
+                <button type="button" className="secondary sm" onClick={() => setHindPieces((p) => Math.max(1, p - 1))}>−</button>
+                <input type="number" inputMode="numeric" min="1" step="1" value={hindPieces} onChange={(e) => setHindPieces(Math.max(1, Number(e.target.value)))} />
+                <button type="button" className="secondary sm" onClick={() => setHindPieces((p) => p + 1)}>+</button>
+              </div>
+            </label>
+            <label>
+              Hind weight (kg) <span className="optional-hint">(leave blank to skip)</span>
+              <input type="number" inputMode="decimal" min="0" step="0.01" value={hindWeightKg} onChange={(e) => setHindWeightKg(e.target.value)} placeholder="0.00" />
+            </label>
+          </div>
+        )}
         <label>
           Supplier
           <select value={supplierId} onChange={(e) => setSupplierId(e.target.value === "new" ? "new" : e.target.value ? Number(e.target.value) : "")}>

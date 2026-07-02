@@ -46,6 +46,12 @@ export interface Product {
   lastCountedAt: string | null;
   lastCountedById: number | null;
   barcode: string | null;
+  // Whole-carcass/organ items the butchery actually takes delivery of
+  // (Whole Forequarter, Liver, Lungs, Oxtail, Whole Lamb, Lamb Hind) —
+  // only these appear as selectable items in the Weigh-In receiving flow.
+  // Everything else (cut/prepped sellable products) is received some
+  // other way, not through Weigh-In.
+  isRawIntake: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -60,6 +66,7 @@ export interface ProductInput {
   department: Department;
   lowStockThreshold: number | null;
   barcode?: string | null;
+  isRawIntake?: number;
 }
 
 // Minimal fields needed to quick-create a product from an unrecognized

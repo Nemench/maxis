@@ -97,7 +97,7 @@ export class KotDatabase {
 
   listProducts(): Product[] {
     return this.db
-      .prepare("SELECT id, name, category, unitDefault, pricePerUnit, prepNotes, department, isActive, lowStockThreshold, onHandQty, lastCountedAt, lastCountedById, barcode, createdAt, updatedAt FROM products WHERE isActive = 1 ORDER BY category, name")
+      .prepare("SELECT id, name, category, unitDefault, pricePerUnit, prepNotes, department, isActive, lowStockThreshold, onHandQty, lastCountedAt, lastCountedById, barcode, isRawIntake, createdAt, updatedAt FROM products WHERE isActive = 1 ORDER BY category, name")
       .all() as Product[];
   }
 
@@ -108,15 +108,16 @@ export class KotDatabase {
   upsertProduct(input: ProductInput): Product {
     const now = new Date().toISOString();
     const barcode = input.barcode?.trim() || null;
+    const isRawIntake = input.isRawIntake ? 1 : 0;
     if (input.id) {
       this.db
-        .prepare("UPDATE products SET name=?, category=?, unitDefault=?, pricePerUnit=?, prepNotes=?, department=?, lowStockThreshold=?, barcode=?, updatedAt=? WHERE id=?")
-        .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, input.lowStockThreshold ?? null, barcode, now, input.id);
+        .prepare("UPDATE products SET name=?, category=?, unitDefault=?, pricePerUnit=?, prepNotes=?, department=?, lowStockThreshold=?, barcode=?, isRawIntake=?, updatedAt=? WHERE id=?")
+        .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, input.lowStockThreshold ?? null, barcode, isRawIntake, now, input.id);
       return this.db.prepare("SELECT * FROM products WHERE id = ?").get(input.id) as Product;
     } else {
       const result = this.db
-        .prepare("INSERT INTO products (name, category, unitDefault, pricePerUnit, prepNotes, department, lowStockThreshold, barcode, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)")
-        .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, input.lowStockThreshold ?? null, barcode, now, now);
+        .prepare("INSERT INTO products (name, category, unitDefault, pricePerUnit, prepNotes, department, lowStockThreshold, barcode, isRawIntake, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)")
+        .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, input.lowStockThreshold ?? null, barcode, isRawIntake, now, now);
       return this.db.prepare("SELECT * FROM products WHERE id = ?").get(Number(result.lastInsertRowid)) as Product;
     }
   }
@@ -687,6 +688,18 @@ export class KotDatabase {
       if (!prodCols.includes("lastCountedAt")) this.db.exec("ALTER TABLE products ADD COLUMN lastCountedAt TEXT");
       if (!prodCols.includes("lastCountedById")) this.db.exec("ALTER TABLE products ADD COLUMN lastCountedById INTEGER REFERENCES users(id)");
       if (!prodCols.includes("barcode")) this.db.exec("ALTER TABLE products ADD COLUMN barcode TEXT");
+      if (!prodCols.includes("isRawIntake")) {
+        this.db.exec("ALTER TABLE products ADD COLUMN isRawIntake INTEGER NOT NULL DEFAULT 0");
+        // One-time best-effort flagging for existing databases: if a product's
+        // name already exactly matches one of the butchery's known raw-intake
+        // items (under whichever name the admin happened to use), flag it
+        // automatically rather than leaving every existing admin to redo this
+        // by hand. Anything that doesn't match exactly is left for the admin
+        // to flag themselves via the new checkbox on the product form.
+        const rawIntakeNames = ["whole forequarter", "beef forequarter", "liver", "lungs", "oxtail", "whole lamb", "lamb hind"];
+        const placeholders = rawIntakeNames.map(() => "?").join(",");
+        this.db.prepare(`UPDATE products SET isRawIntake = 1 WHERE lower(name) IN (${placeholders})`).run(...rawIntakeNames);
+      }
     }
 
     this.db.exec(`
@@ -716,6 +729,7 @@ export class KotDatabase {
         lastCountedAt TEXT,
         lastCountedById INTEGER REFERENCES users(id),
         barcode TEXT,
+        isRawIntake INTEGER NOT NULL DEFAULT 0,
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL
       );
@@ -837,6 +851,17 @@ export class KotDatabase {
       ["Chicken Wings",    "Poultry", "Crispy fried",                "kitchen"],
     ]) {
       ins.run(name, category, prepNotes, dept, now, now);
+    }
+
+    // The fixed set of raw whole-carcass/organ items this butchery actually
+    // takes delivery of — flagged isRawIntake so they're what shows up in
+    // the Weigh-In receiving screen (see WeighInPanel in src/ui/App.tsx).
+    // Lamb Hind is included because it's logged alongside Whole Lamb at
+    // intake (sold on as-is, not processed), not because it's itself a
+    // format the butchery is delivered separately.
+    const insIntake = this.db.prepare("INSERT INTO products (name, category, unitDefault, pricePerUnit, prepNotes, department, isRawIntake, isActive, createdAt, updatedAt) VALUES (?, 'Meat Intake', 'kg', NULL, '', 'counter', 1, 1, ?, ?)");
+    for (const name of ["Whole Forequarter", "Liver", "Lungs", "Oxtail", "Whole Lamb", "Lamb Hind"]) {
+      insIntake.run(name, now, now);
     }
   }
 }
