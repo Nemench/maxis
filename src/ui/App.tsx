@@ -29,6 +29,7 @@ import {
   ScanLine,
   Scissors,
   Settings,
+  ShoppingCart,
   Sun,
   Trash2,
   Users,
@@ -61,7 +62,7 @@ import { api, assetUrl } from "./api";
 import { applyTheme, applyThemeMode, deriveShades, initThemeMode, ThemeMode } from "./theme";
 import { tokenStorage } from "./tokenStorage";
 
-type Tab = "orders" | "queue" | "history" | "products" | "users" | "settings" | "reports" | "weighIn" | "statistics";
+type Tab = "orders" | "pos" | "queue" | "history" | "products" | "users" | "settings" | "reports" | "weighIn" | "statistics";
 
 // Applied at module load (before React's first render) so there's no flash
 // of the wrong theme — reads the stored preference (or system default).
@@ -305,6 +306,9 @@ function MainApp({ currentUser, onLogout, branding, onBrandingChange, themeMode,
               {(currentUser.role === "admin" || currentUser.role === "cashier" || currentUser.role === "master_cashier") && (
                 <button className={tab === "orders" ? "active" : ""} onClick={() => setTab("orders")}><Plus size={18} /><span>New</span></button>
               )}
+              {(currentUser.role === "admin" || currentUser.role === "cashier" || currentUser.role === "master_cashier") && (
+                <button className={tab === "pos" ? "active" : ""} onClick={() => setTab("pos")}><ShoppingCart size={18} /><span>POS</span></button>
+              )}
               <button className={tab === "queue" ? "active" : ""} onClick={() => setTab("queue")}><ClipboardList size={18} /><span>Queue</span></button>
               <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}><History size={18} /><span>History</span></button>
               {currentUser.role === "admin" && (
@@ -364,6 +368,14 @@ function MainApp({ currentUser, onLogout, branding, onBrandingChange, themeMode,
             printStyle={printStyle}
             printerMap={printerMap}
             onCreated={async (order) => { notify(`Created ${order.ticketNumber}`); await refresh(); setTab("queue"); }}
+          />
+        )}
+        {tab === "pos" && (currentUser.role === "admin" || currentUser.role === "cashier" || currentUser.role === "master_cashier") && (
+          <POSPanel
+            products={products}
+            printStyle={printStyle}
+            printerMap={printerMap}
+            onCompleted={async (order) => { notify(`Sale ${order.ticketNumber} complete`); await refresh(); }}
           />
         )}
         {tab === "queue" && <Queue orders={activeOrders} currentUser={currentUser} onChanged={refresh} printStyle={printStyle} printerMap={printerMap} />}
@@ -564,6 +576,157 @@ function OrderEntry({ products, currentUser, autoPrint, printStyle, printerMap, 
         <BarcodeAddModal defaultDept={defaultDept} onAdd={addLineFromBarcode} onClose={() => setBarcodeModalOpen(false)} />
       )}
     </form>
+  );
+}
+
+// ── POS (Point of Sale) ──────────────────────────────────────────────────────
+// Base layer for a walk-in checkout screen: a touch-friendly product grid on
+// one side, a running cart/receipt preview on the other. Distinct from
+// OrderEntry (which builds a kitchen-prep ticket with customer/delivery
+// details) — a POS sale is already-paid-for items handed over on the spot,
+// so it's created via completeImmediately (see createOrder) and lands
+// straight in History, never the prep Queue. Gated to the same roles as
+// "New Order" (admin/cashier/master_cashier), both in MainApp's nav and here.
+function POSPanel({ products, printStyle, printerMap, onCompleted }: { products: Product[]; printStyle: string; printerMap: Record<string, string>; onCompleted: (order: Order) => void }) {
+  const [search, setSearch] = useState("");
+  const [category, setCategory] = useState("All");
+  const [cart, setCart] = useState<OrderItemInput[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const categories = useMemo(() => ["All", ...Array.from(new Set(products.map((p) => p.category || "Other"))).sort()], [products]);
+
+  const visibleProducts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return products
+      .filter((p) => category === "All" || (p.category || "Other") === category)
+      .filter((p) => !q || p.name.toLowerCase().includes(q))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [products, category, search]);
+
+  // Tapping a tile either bumps an existing line's qty (count-priced items,
+  // where "tap 3 times" is the natural touch gesture) or adds a new 1kg line
+  // (weight-priced items, where the weight still needs confirming/editing —
+  // see the stepper below) rather than trying to guess a sensible default kg.
+  const addToCart = (p: Product) => {
+    setCart((cur) => {
+      if (p.unitDefault === "qty") {
+        const idx = cur.findIndex((i) => i.productId === p.id);
+        if (idx >= 0) {
+          const next = [...cur];
+          const quantity = (next[idx].quantity ?? 0) + 1;
+          next[idx] = { ...next[idx], quantity, lineTotal: calculateLineTotal({ ...next[idx], quantity }) };
+          return next;
+        }
+      }
+      const line: OrderItemInput = {
+        productId: p.id, name: p.name, notes: "", department: "counter", unitPrice: p.pricePerUnit,
+        kg: p.unitDefault === "qty" ? null : 1,
+        quantity: p.unitDefault === "qty" ? 1 : null,
+        wantedPrice: null, lineTotal: null
+      };
+      return [...cur, { ...line, lineTotal: calculateLineTotal(line) }];
+    });
+  };
+
+  const updateLine = (index: number, patch: Partial<OrderItemInput>) =>
+    setCart((cur) => cur.map((line, i) => {
+      if (i !== index) return line;
+      const next = { ...line, ...patch };
+      return { ...next, lineTotal: calculateLineTotal(next) };
+    }));
+
+  const removeLine = (index: number) => setCart((cur) => cur.filter((_, i) => i !== index));
+
+  const total = cart.reduce((sum, i) => sum + (i.lineTotal ?? 0), 0);
+  const canCheckout = cart.length > 0 && !submitting;
+
+  const checkout = async () => {
+    if (!canCheckout) return;
+    setSubmitting(true); setError("");
+    const payload: CreateOrderInput = {
+      customerName: "Walk-in customer",
+      customerPhone: "",
+      orderType: "pickup",
+      deliveryAddress: { street: "", area: "", buildingType: "", apartment: "" },
+      requestedTime: "",
+      assignedTo: "",
+      items: cart,
+      completeImmediately: true
+    };
+    try {
+      const order = await api.orders.create(payload);
+      setCart([]);
+      onCompleted(order);
+      void printReceipt(order, "master", printStyle, printerMap.master ?? "");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to complete sale");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="pos-panel">
+      <div className="pos-catalog">
+        <div className="pos-catalog-controls">
+          <input className="pos-search" placeholder="Search items…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          <div className="pos-category-tabs">
+            {categories.map((c) => (
+              <button key={c} type="button" className={`pos-category-tab ${category === c ? "active" : ""}`} onClick={() => setCategory(c)}>{c}</button>
+            ))}
+          </div>
+        </div>
+        <div className="pos-product-grid">
+          {visibleProducts.map((p) => (
+            <button key={p.id} type="button" className="pos-product-tile" onClick={() => addToCart(p)}>
+              <span className="pos-product-name">{p.name}</span>
+              <span className="pos-product-price">{p.pricePerUnit != null ? `${currency.format(p.pricePerUnit)}${p.unitDefault === "qty" ? " ea" : "/kg"}` : "—"}</span>
+            </button>
+          ))}
+          {visibleProducts.length === 0 && <p className="report-empty">No items match.</p>}
+        </div>
+      </div>
+
+      <div className="pos-receipt">
+        <h3>Receipt preview</h3>
+        <div className="pos-receipt-lines">
+          {cart.length === 0 && <p className="report-empty">Tap items to add them to the sale.</p>}
+          {cart.map((line, i) => (
+            <div className="pos-receipt-line" key={i}>
+              <div className="pos-receipt-line-top">
+                <span className="pos-receipt-line-name">{line.name}</span>
+                <button type="button" className="icon-button danger sm" onClick={() => removeLine(i)} title="Remove" aria-label="Remove"><Trash2 size={16} /></button>
+              </div>
+              <div className="pos-receipt-line-controls">
+                {line.quantity != null ? (
+                  <div className="pos-stepper">
+                    <button type="button" onClick={() => updateLine(i, { quantity: Math.max(1, (line.quantity ?? 1) - 1) })}>−</button>
+                    <span>{line.quantity}</span>
+                    <button type="button" onClick={() => updateLine(i, { quantity: (line.quantity ?? 0) + 1 })}>+</button>
+                  </div>
+                ) : (
+                  <div className="pos-stepper">
+                    <button type="button" onClick={() => updateLine(i, { kg: Number(Math.max(0.1, (line.kg ?? 1) - 0.1).toFixed(2)) })}>−</button>
+                    <span>{(line.kg ?? 0).toFixed(2)} kg</span>
+                    <button type="button" onClick={() => updateLine(i, { kg: Number(((line.kg ?? 0) + 0.1).toFixed(2)) })}>+</button>
+                  </div>
+                )}
+                <span className="pos-receipt-line-total">{line.lineTotal != null ? currency.format(line.lineTotal) : "—"}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="pos-receipt-total">
+          <span>Total</span>
+          <span>{currency.format(total)}</span>
+        </div>
+        {error && <p className="form-error">{error}</p>}
+        <button type="button" className="pos-checkout-btn" disabled={!canCheckout} onClick={() => void checkout()}>
+          {submitting ? "Completing…" : "Complete sale & print"}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -3104,17 +3267,20 @@ function nextDeptStatus(status: DeptStatus): DeptStatus | null {
 
 function calculateLineTotal(item: OrderItemInput) {
   if (item.wantedPrice) return Number(item.wantedPrice.toFixed(2));
-  if (!item.unitPrice || !item.kg) return null;
-  return Number((item.kg * item.unitPrice).toFixed(2));
+  if (!item.unitPrice) return null;
+  if (item.kg) return Number((item.kg * item.unitPrice).toFixed(2));
+  if (item.quantity) return Number((item.quantity * item.unitPrice).toFixed(2));
+  return null;
 }
 
 function tabTitle(tab: Tab) {
-  return { orders: "New Order", queue: "Prep Queue", history: "Order History", products: "Stock", users: "Users", settings: "Settings", reports: "Reports", weighIn: "Weigh-In", statistics: "Statistics" }[tab];
+  return { orders: "New Order", pos: "POS", queue: "Prep Queue", history: "Order History", products: "Stock", users: "Users", settings: "Settings", reports: "Reports", weighIn: "Weigh-In", statistics: "Statistics" }[tab];
 }
 
 function tabSubtitle(tab: Tab) {
   return {
     orders: "Capture customer details, weights, and cutting notes.",
+    pos: "Ring up a walk-in sale and print the receipt.",
     queue: "Move tickets through each stage.",
     history: "Review completed tickets.",
     settings: "System configuration.",

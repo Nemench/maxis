@@ -195,6 +195,10 @@ export interface CreateOrderInput {
   requestedTime: string;
   assignedTo: string;
   items: OrderItemInput[];
+  // Set by the POS checkout screen: items are already paid for and handed
+  // over on the spot, so the order is created already Done (History) rather
+  // than New (Queue) — there's no prep step left for anyone to action.
+  completeImmediately?: boolean;
 }
 
 export interface Order {

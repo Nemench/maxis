@@ -560,12 +560,14 @@ export class KotDatabase {
     const ticketNumber = this.nextTicketNumber();
     const hasKitchen = input.items.some((i) => i.department === "kitchen");
     const hasCounter = input.items.some((i) => i.department === "counter");
-    const kitchenStatus: DeptStatus = hasKitchen ? "New" : "n/a";
-    const counterStatus: DeptStatus = hasCounter ? "New" : "n/a";
+    const doneNow = input.completeImmediately ?? false;
+    const kitchenStatus: DeptStatus = hasKitchen ? (doneNow ? "Done" : "New") : "n/a";
+    const counterStatus: DeptStatus = hasCounter ? (doneNow ? "Done" : "New") : "n/a";
+    const overallStatus: OrderStatus = doneNow ? "Done" : "New";
 
     const result = this.db
-      .prepare("INSERT INTO orders (ticketNumber, customerName, customerPhone, orderType, deliveryAddress, requestedTime, assignedTo, status, kitchenStatus, counterStatus, requestedById, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?)")
-      .run(ticketNumber, input.customerName.trim(), input.customerPhone.trim(), input.orderType, input.orderType === "delivery" ? JSON.stringify(input.deliveryAddress) : "{}", input.requestedTime.trim(), input.assignedTo?.trim() || null, kitchenStatus, counterStatus, requestedById, now, now);
+      .prepare("INSERT INTO orders (ticketNumber, customerName, customerPhone, orderType, deliveryAddress, requestedTime, assignedTo, status, kitchenStatus, counterStatus, requestedById, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(ticketNumber, input.customerName.trim(), input.customerPhone.trim(), input.orderType, input.orderType === "delivery" ? JSON.stringify(input.deliveryAddress) : "{}", input.requestedTime.trim(), input.assignedTo?.trim() || null, overallStatus, kitchenStatus, counterStatus, requestedById, now, now);
 
     const orderId = Number(result.lastInsertRowid);
     const insertItem = this.db.prepare(

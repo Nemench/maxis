@@ -31,6 +31,10 @@ router.get("/", (req: AuthRequest, res) => {
 });
 
 router.post("/", (req: AuthRequest, res) => {
+  if (!canAddItems(req)) {
+    res.status(403).json({ message: "Not authorized to create orders" });
+    return;
+  }
   try { res.status(201).json(db.createOrder(req.body as CreateOrderInput, req.user!.id)); }
   catch (err) { res.status(400).json({ message: err instanceof Error ? err.message : "Failed to create order" }); }
 });
