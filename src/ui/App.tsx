@@ -599,11 +599,19 @@ function POSPanel({ products, printStyle, printerMap, onCompleted }: { products:
 
   // Fixed hue order (never reassigned by filtering/sorting elsewhere) so a
   // category's color stays put — the 9th+ category folds into a neutral
-  // "other" tile rather than wrapping back onto an already-used hue.
+  // "other" badge rather than wrapping back onto an already-used hue.
   const sortedCategories = useMemo(() => categories.filter((c) => c !== "All"), [categories]);
-  const categoryTileClass = (cat: string) => {
+  const categoryBadgeClass = (cat: string) => {
     const idx = sortedCategories.indexOf(cat);
     return idx >= 0 && idx < 8 ? `pos-cat-${idx + 1}` : "pos-cat-other";
+  };
+
+  // Quick visual identifier per tile — initials of the product name (up to
+  // 2 letters), badge-colored by category so items are still scannable at
+  // a glance even with the name text right below it.
+  const initials = (name: string) => {
+    const words = name.trim().split(/\s+/);
+    return words.length > 1 ? (words[0][0] + words[1][0]).toUpperCase() : name.slice(0, 2).toUpperCase();
   };
 
   const visibleProducts = useMemo(() => {
@@ -650,14 +658,17 @@ function POSPanel({ products, printStyle, printerMap, onCompleted }: { products:
 
   const clearSale = () => { setCart([]); setDiscount(0); setError(""); };
 
-  // No tax-rate setting exists yet anywhere in Settings, so Tax is a fixed
-  // R0.00 placeholder line (matching the reference layout's breakdown) —
-  // Discount is the one figure actually wired up, a flat manually-entered
-  // rand amount, clamped so it can never take the total below zero.
+  // South African retail prices are required to be displayed VAT-inclusive
+  // (Consumer Protection Act / VAT Act) — pricePerUnit is already the
+  // sticker price, so "VAT" here is the tax component already sitting
+  // inside the total, not an amount added on top. No tax-rate setting
+  // exists yet anywhere in Settings, so 15% (the SA standard rate) is
+  // hardcoded rather than configurable.
+  const VAT_RATE = 0.15;
   const subtotal = cart.reduce((sum, i) => sum + (i.lineTotal ?? 0), 0);
-  const tax = 0;
   const clampedDiscount = Math.min(Math.max(0, discount), subtotal);
-  const total = subtotal - clampedDiscount + tax;
+  const total = subtotal - clampedDiscount;
+  const vat = total * (VAT_RATE / (1 + VAT_RATE));
   const canCheckout = cart.length > 0 && !submitting;
 
   const checkout = async () => {
@@ -687,89 +698,85 @@ function POSPanel({ products, printStyle, printerMap, onCompleted }: { products:
 
   return (
     <div className="pos-panel">
-      <div className="pos-actions-bar">
-        <button type="button" className="pos-action-btn pos-action-primary" disabled={!canCheckout} onClick={() => void checkout()}>
-          {submitting ? "Completing…" : "Complete Sale & Print"}
-        </button>
-        <button type="button" className="pos-action-btn pos-action-danger" disabled={cart.length === 0 || submitting} onClick={clearSale}>
-          Clear Sale
-        </button>
+      <div className="pos-catalog">
+        <div className="pos-catalog-controls">
+          <input className="pos-search" placeholder="Search items…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          <div className="pos-category-tabs">
+            {categories.map((c) => (
+              <button key={c} type="button" className={`pos-category-tab ${category === c ? "active" : ""}`} onClick={() => setCategory(c)}>{c}</button>
+            ))}
+          </div>
+        </div>
+        <div className="pos-product-grid">
+          {visibleProducts.map((p) => (
+            <button key={p.id} type="button" className="pos-product-tile" onClick={() => addToCart(p)}>
+              <span className={`pos-product-badge ${categoryBadgeClass(p.category || "Other")}`}>{initials(p.name)}</span>
+              <span className="pos-product-name">{p.name}</span>
+              <span className="pos-product-price">{p.pricePerUnit != null ? `${currency.format(p.pricePerUnit)}${p.unitDefault === "qty" ? " ea" : "/kg"}` : "—"}</span>
+            </button>
+          ))}
+          {visibleProducts.length === 0 && <p className="report-empty">No items match.</p>}
+        </div>
       </div>
 
-      <div className="pos-body">
-        <div className="pos-receipt">
+      <div className="pos-receipt">
+        <div className="pos-receipt-header">
           <h3>Receipt preview</h3>
-          <div className="pos-receipt-lines">
-            {cart.length === 0 && <p className="report-empty">Tap items to add them to the sale.</p>}
-            {cart.map((line, i) => (
-              <div className="pos-receipt-line" key={i}>
-                <div className="pos-receipt-line-top">
-                  <span className="pos-receipt-line-name">{line.name}</span>
-                  <button type="button" className="icon-button danger sm" onClick={() => removeLine(i)} title="Remove" aria-label="Remove"><Trash2 size={16} /></button>
-                </div>
-                <div className="pos-receipt-line-controls">
-                  {line.quantity != null ? (
-                    <div className="pos-stepper">
-                      <button type="button" onClick={() => updateLine(i, { quantity: Math.max(1, (line.quantity ?? 1) - 1) })}>−</button>
-                      <span>{line.quantity}</span>
-                      <button type="button" onClick={() => updateLine(i, { quantity: (line.quantity ?? 0) + 1 })}>+</button>
-                    </div>
-                  ) : (
-                    <div className="pos-stepper">
-                      <button type="button" onClick={() => updateLine(i, { kg: Number(Math.max(0.1, (line.kg ?? 1) - 0.1).toFixed(2)) })}>−</button>
-                      <span>{(line.kg ?? 0).toFixed(2)} kg</span>
-                      <button type="button" onClick={() => updateLine(i, { kg: Number(((line.kg ?? 0) + 0.1).toFixed(2)) })}>+</button>
-                    </div>
-                  )}
-                  <span className="pos-receipt-line-total">{line.lineTotal != null ? currency.format(line.lineTotal) : "—"}</span>
-                </div>
+          <button type="button" className="pos-clear-btn" disabled={cart.length === 0 || submitting} onClick={clearSale}>Clear</button>
+        </div>
+        <div className="pos-receipt-lines">
+          {cart.length === 0 && <p className="report-empty">Tap items to add them to the sale.</p>}
+          {cart.map((line, i) => (
+            <div className="pos-receipt-line" key={i}>
+              <div className="pos-receipt-line-top">
+                <span className="pos-receipt-line-name">{line.name}</span>
+                <button type="button" className="icon-button danger sm" onClick={() => removeLine(i)} title="Remove" aria-label="Remove"><Trash2 size={16} /></button>
               </div>
-            ))}
-          </div>
-          <div className="pos-receipt-breakdown">
-            <div className="pos-breakdown-row">
-              <span>Subtotal</span>
-              <span>{currency.format(subtotal)}</span>
+              <div className="pos-receipt-line-controls">
+                {line.quantity != null ? (
+                  <div className="pos-stepper">
+                    <button type="button" onClick={() => updateLine(i, { quantity: Math.max(1, (line.quantity ?? 1) - 1) })}>−</button>
+                    <span>{line.quantity}</span>
+                    <button type="button" onClick={() => updateLine(i, { quantity: (line.quantity ?? 0) + 1 })}>+</button>
+                  </div>
+                ) : (
+                  <div className="pos-stepper">
+                    <button type="button" onClick={() => updateLine(i, { kg: Number(Math.max(0.1, (line.kg ?? 1) - 0.1).toFixed(2)) })}>−</button>
+                    <span>{(line.kg ?? 0).toFixed(2)} kg</span>
+                    <button type="button" onClick={() => updateLine(i, { kg: Number(((line.kg ?? 0) + 0.1).toFixed(2)) })}>+</button>
+                  </div>
+                )}
+                <span className="pos-receipt-line-total">{line.lineTotal != null ? currency.format(line.lineTotal) : "—"}</span>
+              </div>
             </div>
-            <div className="pos-breakdown-row">
-              <span>Discount</span>
-              <input
-                type="number" min="0" step="0.01" className="pos-discount-input"
-                value={discount || ""} placeholder="0.00"
-                onChange={(e) => setDiscount(e.target.value ? Number(e.target.value) : 0)}
-              />
-            </div>
-            <div className="pos-breakdown-row">
-              <span>Tax</span>
-              <span>{currency.format(tax)}</span>
-            </div>
-            <div className="pos-breakdown-row pos-breakdown-total">
-              <span>Total</span>
-              <span>{currency.format(total)}</span>
-            </div>
-          </div>
-          {error && <p className="form-error">{error}</p>}
+          ))}
         </div>
-
-        <div className="pos-catalog">
-          <div className="pos-catalog-controls">
-            <input className="pos-search" placeholder="Search items…" value={search} onChange={(e) => setSearch(e.target.value)} />
-            <div className="pos-category-tabs">
-              {categories.map((c) => (
-                <button key={c} type="button" className={`pos-category-tab ${category === c ? "active" : ""}`} onClick={() => setCategory(c)}>{c}</button>
-              ))}
-            </div>
+        <div className="pos-receipt-breakdown">
+          <div className="pos-breakdown-row">
+            <span>Subtotal</span>
+            <span>{currency.format(subtotal)}</span>
           </div>
-          <div className="pos-product-grid">
-            {visibleProducts.map((p) => (
-              <button key={p.id} type="button" className={`pos-product-tile ${categoryTileClass(p.category || "Other")}`} onClick={() => addToCart(p)}>
-                <span className="pos-product-name">{p.name}</span>
-                <span className="pos-product-price">{p.pricePerUnit != null ? `${currency.format(p.pricePerUnit)}${p.unitDefault === "qty" ? " ea" : "/kg"}` : "—"}</span>
-              </button>
-            ))}
-            {visibleProducts.length === 0 && <p className="report-empty">No items match.</p>}
+          <div className="pos-breakdown-row">
+            <span>Discount</span>
+            <input
+              type="number" min="0" step="0.01" className="pos-discount-input"
+              value={discount || ""} placeholder="0.00"
+              onChange={(e) => setDiscount(e.target.value ? Number(e.target.value) : 0)}
+            />
+          </div>
+          <div className="pos-breakdown-row">
+            <span>VAT incl. (15%)</span>
+            <span>{currency.format(vat)}</span>
+          </div>
+          <div className="pos-breakdown-row pos-breakdown-total">
+            <span>Total</span>
+            <span>{currency.format(total)}</span>
           </div>
         </div>
+        {error && <p className="form-error">{error}</p>}
+        <button type="button" className="pos-charge-btn" disabled={!canCheckout} onClick={() => void checkout()}>
+          {submitting ? "Completing…" : `Charge ${currency.format(total)}`}
+        </button>
       </div>
     </div>
   );
