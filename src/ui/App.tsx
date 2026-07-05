@@ -373,7 +373,6 @@ function MainApp({ currentUser, onLogout, branding, onBrandingChange, themeMode,
         {tab === "pos" && (currentUser.role === "admin" || currentUser.role === "cashier" || currentUser.role === "master_cashier") && (
           <POSPanel
             products={products}
-            printStyle={printStyle}
             printerMap={printerMap}
             onCompleted={async (order) => { notify(`Sale ${order.ticketNumber} complete`); await refresh(); }}
           />
@@ -587,13 +586,17 @@ function OrderEntry({ products, currentUser, autoPrint, printStyle, printerMap, 
 // so it's created via completeImmediately (see createOrder) and lands
 // straight in History, never the prep Queue. Gated to the same roles as
 // "New Order" (admin/cashier/master_cashier), both in MainApp's nav and here.
-function POSPanel({ products, printStyle, printerMap, onCompleted }: { products: Product[]; printStyle: string; printerMap: Record<string, string>; onCompleted: (order: Order) => void }) {
+function POSPanel({ products, printerMap, onCompleted }: { products: Product[]; printerMap: Record<string, string>; onCompleted: (order: Order) => void }) {
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("All");
   const [cart, setCart] = useState<OrderItemInput[]>([]);
   const [discount, setDiscount] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  // Index of the line awaiting PIN confirmation before it's actually
+  // removed — a fat-finger tap on the trash icon during a live sale
+  // shouldn't be enough on its own to drop an item.
+  const [pendingRemoveIndex, setPendingRemoveIndex] = useState<number | null>(null);
 
   const categories = useMemo(() => ["All", ...Array.from(new Set(products.map((p) => p.category || "Other"))).sort()], [products]);
 
@@ -688,7 +691,12 @@ function POSPanel({ products, printStyle, printerMap, onCompleted }: { products:
       const order = await api.orders.create(payload);
       clearSale();
       onCompleted(order);
-      void printReceipt(order, "master", printStyle, printerMap.master ?? "");
+      // Always the narrow thermal receipt layout here, regardless of the
+      // admin's general KOT ticket print-style setting — a POS walk-in
+      // sale is a till slip, not a full-page order form, so it shouldn't
+      // print as an A4 "PDF"-looking document even if that's configured
+      // for kitchen/counter tickets elsewhere.
+      void printReceipt(order, "master", "thermal", printerMap.master ?? "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to complete sale");
     } finally {
@@ -730,7 +738,7 @@ function POSPanel({ products, printStyle, printerMap, onCompleted }: { products:
             <div className="pos-receipt-line" key={i}>
               <div className="pos-receipt-line-top">
                 <span className="pos-receipt-line-name">{line.name}</span>
-                <button type="button" className="icon-button danger sm" onClick={() => removeLine(i)} title="Remove" aria-label="Remove"><Trash2 size={16} /></button>
+                <button type="button" className="icon-button danger sm" onClick={() => setPendingRemoveIndex(i)} title="Remove" aria-label="Remove"><Trash2 size={16} /></button>
               </div>
               <div className="pos-receipt-line-controls">
                 {line.quantity != null ? (
@@ -777,6 +785,64 @@ function POSPanel({ products, printStyle, printerMap, onCompleted }: { products:
         <button type="button" className="pos-charge-btn" disabled={!canCheckout} onClick={() => void checkout()}>
           {submitting ? "Completing…" : `Charge ${currency.format(total)}`}
         </button>
+      </div>
+      {pendingRemoveIndex != null && (
+        <PinConfirmModal
+          title="Remove item?"
+          message={`Enter your PIN to remove "${cart[pendingRemoveIndex]?.name}" from this sale.`}
+          onConfirm={() => { removeLine(pendingRemoveIndex); setPendingRemoveIndex(null); }}
+          onCancel={() => setPendingRemoveIndex(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Generic "re-enter your PIN before this mistake-prone action" gate — checks
+// the currently logged-in user's own PIN against the server (see
+// /auth/verify-pin) without changing the session, then calls onConfirm.
+// Doesn't re-check role/permissions itself; it's a fat-finger guard, not an
+// authorization boundary — the underlying action still enforces its own.
+function PinConfirmModal({ title, message, onConfirm, onCancel }: { title: string; message: string; onConfirm: () => void; onCancel: () => void }) {
+  const [pin, setPin] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!pin || busy) return;
+    setBusy(true); setError("");
+    try {
+      await api.auth.verifyPin(pin);
+      onConfirm();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Incorrect PIN");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div className="modal-card panel">
+        <div className="modal-header">
+          <h2>{title}</h2>
+          <button type="button" className="icon-button" onClick={onCancel} aria-label="Close"><X size={18} /></button>
+        </div>
+        <form className="modal-body" onSubmit={(e) => void submit(e)}>
+          <p>{message}</p>
+          <label>PIN
+            <input
+              type="password" inputMode="numeric" autoFocus maxLength={8}
+              value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
+            />
+          </label>
+          {error && <p className="form-error">{error}</p>}
+          <footer className="actions">
+            <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
+            <button type="submit" className="danger" disabled={!pin || busy}>{busy ? "Checking…" : "Confirm removal"}</button>
+          </footer>
+        </form>
       </div>
     </div>
   );

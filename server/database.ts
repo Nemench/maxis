@@ -55,6 +55,17 @@ export class KotDatabase {
       .get(name) as (User & { pin: string }) | null;
   }
 
+  // Re-confirms the currently logged-in user's own PIN (e.g. before an
+  // accidental-tap-prone action like removing a POS line) without issuing
+  // a new token or touching the session — just a yes/no on "is this really
+  // them." isActive is intentionally not required here: unlike login, a
+  // user who's mid-shift shouldn't get locked out of confirming an action
+  // because someone else deactivated their account moments earlier.
+  verifyUserPin(id: number, pin: string): boolean {
+    const row = this.db.prepare("SELECT pin FROM users WHERE id = ?").get(id) as { pin: string } | null;
+    return !!row && bcrypt.compareSync(String(pin), row.pin);
+  }
+
   setUserThemeMode(id: number, themeMode: "light" | "dark"): User {
     this.db.prepare("UPDATE users SET themeMode = ? WHERE id = ?").run(themeMode, id);
     return this.getUser(id)!;

@@ -65,7 +65,8 @@ export const api = {
     login: (name: string, pin: string) => req<{ token: string; user: User }>("POST", "/auth/login", { name, pin }),
     me: () => req<User>("GET", "/auth/me"),
     setThemeMode: (themeMode: "light" | "dark") =>
-      req<{ token: string; user: User }>("PATCH", "/auth/theme-mode", { themeMode })
+      req<{ token: string; user: User }>("PATCH", "/auth/theme-mode", { themeMode }),
+    verifyPin: (pin: string) => req<{ ok: boolean }>("POST", "/auth/verify-pin", { pin })
   },
   users: {
     list: () => req<User[]>("GET", "/users"),

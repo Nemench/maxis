@@ -45,6 +45,37 @@ router.post("/login", (req, res) => {
   res.json({ token: signToken(safeUser), user: safeUser });
 });
 
+// Re-confirms the logged-in user's own PIN before a mistake-prone action
+// (e.g. removing a line from a POS sale) — a "yes, this was really you"
+// gate, not a fresh login: no new token, no session change. Shares the
+// login route's per-IP brute-force guard, since it's the same PIN-guessing
+// attack surface on a shared terminal.
+router.post("/verify-pin", requireAuth, (req: AuthRequest, res) => {
+  const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
+  const now = Date.now();
+
+  const rec = loginAttempts.get(ip);
+  if (rec && now < rec.resetAt && rec.count >= 10) {
+    res.status(429).json({ message: "Too many failed attempts. Please wait 15 minutes." });
+    return;
+  }
+
+  const { pin } = req.body as { pin: string };
+  if (!pin || !db.verifyUserPin(req.user!.id, pin)) {
+    const existing = loginAttempts.get(ip);
+    if (existing && now < existing.resetAt) existing.count++;
+    else loginAttempts.set(ip, { count: 1, resetAt: now + 15 * 60 * 1000 });
+    // 403, not 401 — the client's req() helper treats any 401 as "session
+    // expired" and force-logs-out on the spot, which a wrong PIN here
+    // definitely isn't (the session/token are still perfectly valid).
+    res.status(403).json({ message: "Incorrect PIN" });
+    return;
+  }
+
+  loginAttempts.delete(ip);
+  res.json({ ok: true });
+});
+
 // Used on app boot to validate a stored token and refresh user info
 // (e.g. role changes made by an admin take effect without re-login).
 router.get("/me", requireAuth, (req: AuthRequest, res) => {
