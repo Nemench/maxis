@@ -614,6 +614,9 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
   // removed — a fat-finger tap on the trash icon during a live sale
   // shouldn't be enough on its own to drop an item.
   const [pendingRemoveIndex, setPendingRemoveIndex] = useState<number | null>(null);
+  // Same guard on wiping the whole sale — one stray tap on Clear Sale
+  // shouldn't be able to drop an entire in-progress cart.
+  const [pendingClearSale, setPendingClearSale] = useState(false);
 
   // Survives switching tabs away from POS and back (this component
   // unmounts on tab switch, which would otherwise wipe React state), and
@@ -809,7 +812,7 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
         </div>
         {error && <p className="form-error">{error}</p>}
         <div className="pos-receipt-actions">
-          <button type="button" className="pos-clear-btn" disabled={cart.length === 0 || submitting} onClick={clearSale}>Clear Sale</button>
+          <button type="button" className="pos-clear-btn" disabled={cart.length === 0 || submitting} onClick={() => setPendingClearSale(true)}>Clear Sale</button>
           <button type="button" className="pos-charge-btn" disabled={!canCheckout} onClick={() => void checkout()}>
             {submitting ? "Completing…" : `Charge ${currency.format(total)}`}
           </button>
@@ -821,6 +824,14 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
           message={`Enter your PIN to remove "${cart[pendingRemoveIndex]?.name}" from this sale.`}
           onConfirm={() => { removeLine(pendingRemoveIndex); setPendingRemoveIndex(null); }}
           onCancel={() => setPendingRemoveIndex(null)}
+        />
+      )}
+      {pendingClearSale && (
+        <PinConfirmModal
+          title="Clear sale?"
+          message="Enter your PIN to clear this entire sale."
+          onConfirm={() => { clearSale(); setPendingClearSale(false); }}
+          onCancel={() => setPendingClearSale(false)}
         />
       )}
     </div>
