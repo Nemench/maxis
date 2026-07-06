@@ -9,6 +9,7 @@
     "build": "vite build",
     "start": "NODE_ENV=production tsx server/index.ts",
     "lint": "eslint .",
+    "test": "vitest run",
     "build:win": "npm run build && npx tsup && npx electron-builder --win --publish never",
     "electron:preview": "npm run build && npx tsup && npx electron .",
     "cap:sync": "npm run build && npx cap sync android",
@@ -28,6 +29,7 @@
     "express": "^4.21.0",
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
+    "jsbarcode": "^3.12.3",
     "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
@@ -47,6 +49,7 @@
     "@types/compression": "^1.8.1",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
+    "@types/jsbarcode": "^3.11.4",
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
@@ -61,7 +64,8 @@
     "tsup": "^8.0.0",
     "typescript": "^5.8.0",
     "typescript-eslint": "^8.0.0",
-    "vite": "^7.0.0"
+    "vite": "^7.0.0",
+    "vitest": "^4.1.10"
   },
   "build": {
     "appId": "com.nemench.maxis",

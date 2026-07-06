@@ -36,8 +36,10 @@ import {
   Weight,
   X
 } from "lucide-react";
+import JsBarcode from "jsbarcode";
 import { appSettings } from "../shared/settings";
 import { parseWeighBarcode } from "../shared/weighBarcode";
+import { generateInternalBarcode } from "../shared/internalBarcode";
 import type {
   CreateOrderInput,
   DeliveryAddress,
@@ -1533,8 +1535,12 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
     if (!name) { setStockMessage("Enter a name."); return; }
     setBusy(true); setStockMessage("");
     try {
-      await api.products.save({ ...editing, name, unitDefault: "kg", category: editing.category.trim() || "General", prepNotes: editing.prepNotes.trim() });
-      setEditing(EMPTY_PRODUCT);
+      const saved = await api.products.save({ ...editing, name, unitDefault: "kg", category: editing.category.trim() || "General", prepNotes: editing.prepNotes.trim() });
+      // Stays populated with the saved product (rather than resetting to
+      // EMPTY_PRODUCT) so a barcode auto-generated on this save — see
+      // upsertProduct — is immediately visible/printable, not silently
+      // applied somewhere the admin has to go looking for it.
+      setEditing(saved);
       setStockMessage("Saved.");
     } catch (err) {
       setStockMessage(err instanceof Error ? err.message : "Could not save.");
@@ -1547,6 +1553,28 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
     if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
     await api.products.delete(id);
     await onChanged();
+  };
+
+  // Deterministic by construction (see generateInternalBarcode) — this
+  // isn't "generate a new one," it's "re-derive the same one and persist
+  // it," for when a printed sticker is damaged/lost and needs reprinting,
+  // or to force an existing product back onto the auto scheme.
+  const regenerateBarcode = async () => {
+    if (!editing.id) return;
+    setBusy(true); setStockMessage("");
+    try {
+      const saved = await api.products.save({ ...editing, barcode: generateInternalBarcode(editing.id) });
+      setEditing(saved);
+      setStockMessage("Barcode regenerated.");
+      await onChanged().catch(() => undefined);
+    } catch (err) {
+      setStockMessage(err instanceof Error ? err.message : "Could not regenerate barcode.");
+    } finally { setBusy(false); }
+  };
+
+  const printSticker = () => {
+    if (!editing.barcode) return;
+    printHtml(buildBarcodeStickerHtml(editing.name, editing.barcode, editing.pricePerUnit ?? null));
   };
 
   return (
@@ -1572,7 +1600,7 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
         </label>
         <label>Prep notes<textarea value={editing.prepNotes} onChange={(e) => setEditing({ ...editing, prepNotes: e.target.value })} /></label>
         <label>
-          Barcode / scale PLU <span className="optional-hint">(optional)</span>
+          Barcode / scale PLU <span className="optional-hint">(optional — auto-generated on save if left blank)</span>
           <div className="barcode-field-row">
             <input value={editing.barcode ?? ""} onChange={(e) => setEditing({ ...editing, barcode: e.target.value })} placeholder="e.g. 6001234567890, or a 5-digit PLU" />
             <button type="button" className="secondary sm" onClick={() => setWeighScanOpen(true)}><ScanLine size={16} /> Scan weigh-label</button>
@@ -1580,9 +1608,20 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
           <p className="settings-hint">
             For a product with a normal printed barcode, enter (or scan) that full number. For a product sold by weight on the scale
             (price changes every time it's weighed, so the barcode is different every label), enter just its 5-digit scale item code (PLU)
-            — the "Scan weigh-label" button reads one and fills in the PLU automatically.
+            — the "Scan weigh-label" button reads one and fills in the PLU automatically. Leave this blank to have one generated
+            automatically when you save (a fixed, scannable "29"-prefixed code derived from the item, distinct from real manufacturer
+            barcodes and from the scale's own weigh-labels).
           </p>
         </label>
+        {editing.id && editing.barcode && (
+          <div className="barcode-preview">
+            <BarcodeImage value={editing.barcode} />
+            <div className="barcode-preview-actions">
+              <button type="button" className="secondary sm" onClick={() => void regenerateBarcode()} disabled={busy}>Regenerate barcode</button>
+              <button type="button" className="secondary sm" onClick={printSticker}><Printer size={16} /> Print sticker</button>
+            </div>
+          </div>
+        )}
         <label>
           Low-stock threshold
           <input type="number" min="0" step="0.01" placeholder="No warning" value={editing.lowStockThreshold ?? ""} onChange={(e) => setEditing({ ...editing, lowStockThreshold: e.target.value ? Number(e.target.value) : null })} />
@@ -1638,6 +1677,25 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
       )}
     </div>
   );
+}
+
+// Renders a scannable barcode image so an admin can visually verify it
+// (right digits, right symbology) before printing a sticker — not just
+// trust the raw digit string. JsBarcode draws directly into the <svg> via
+// its DOM ref rather than through React children, so this needs an effect.
+function BarcodeImage({ value }: { value: string }) {
+  const svgRef = useRef<SVGSVGElement>(null);
+  useEffect(() => {
+    if (!svgRef.current) return;
+    try {
+      JsBarcode(svgRef.current, value, { format: "EAN13", displayValue: true, height: 60, margin: 8 });
+    } catch {
+      // Not a valid EAN-13 (e.g. a hand-typed manual barcode of another
+      // length/symbology) — leave the image blank rather than throwing;
+      // the raw value is still shown in the text field above.
+    }
+  }, [value]);
+  return <svg ref={svgRef} className="barcode-svg" />;
 }
 
 // Scans a scale-generated weigh-label barcode (see parseWeighBarcode) and
@@ -3606,6 +3664,36 @@ ${supplierSections}
 <tr class="totals"><td>Grand total</td><td>${grandPieces}</td><td>${grandKg.toFixed(2)}</td></tr>
 </tbody></table>
 </div>
+</body></html>`;
+}
+
+// Renders a barcode to a standalone SVG markup string (rather than into a
+// React-owned <svg>) so it can be embedded in the standalone sticker
+// document below — JsBarcode draws into a real DOM element regardless, so
+// a detached one is created, drawn into, then serialized and discarded.
+function renderBarcodeSvgMarkup(value: string): string {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  JsBarcode(svg, value, { format: "EAN13", displayValue: true, height: 60, margin: 8 });
+  return new XMLSerializer().serializeToString(svg);
+}
+
+// A small printable sticker — barcode plus item name/price — reusing the
+// same printHtml()/api.print() pipe as receipts and KOT tickets (see
+// printReceipt) rather than a separate print mechanism, so it goes to
+// whatever printer is already configured. Sized for a small label
+// (50mm x 30mm) rather than a full receipt/page.
+function buildBarcodeStickerHtml(name: string, barcode: string, pricePerUnit: number | null): string {
+  const barcodeSvg = renderBarcodeSvgMarkup(barcode);
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sticker — ${esc(barcode)}</title><style>
+@page{size:50mm 30mm;margin:0}*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Inter,Arial,sans-serif;width:50mm;height:30mm;padding:2mm;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+.name{font-size:10px;font-weight:700;line-height:1.2;max-height:24px;overflow:hidden}
+.price{font-size:11px;font-weight:800;margin-top:1mm}
+svg{width:100%;max-height:16mm}
+</style></head><body>
+<div class="name">${esc(name)}</div>
+${pricePerUnit != null ? `<div class="price">${currency.format(pricePerUnit)}/kg</div>` : ""}
+${barcodeSvg}
 </body></html>`;
 }
 

@@ -15,6 +15,7 @@ import type {
   Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput,
   StockLocation, ProductStockRow, ItemSalesStat, ItemStockMovementStat, StatisticsOverview
 } from "../src/shared/types.js";
+import { generateInternalBarcode } from "../src/shared/internalBarcode.js";
 
 export class KotDatabase {
   private db!: BetterSqlite3.Database;
@@ -136,11 +137,17 @@ export class KotDatabase {
     return this.db.prepare("SELECT * FROM products WHERE barcode = ? AND isActive = 1").get(barcode) as Product | null;
   }
 
+  // If no barcode is entered, one is auto-generated from the product's own
+  // id (see generateInternalBarcode) rather than left null — every product
+  // ends up scannable, whether or not it has a real manufacturer barcode.
+  // For a brand-new product the id doesn't exist until after the INSERT,
+  // so that case generates it in a follow-up UPDATE rather than up front.
   upsertProduct(input: ProductInput): Product {
     const now = new Date().toISOString();
-    const barcode = input.barcode?.trim() || null;
+    const providedBarcode = input.barcode?.trim() || null;
     const isRawIntake = input.isRawIntake ? 1 : 0;
     if (input.id) {
+      const barcode = providedBarcode ?? generateInternalBarcode(input.id);
       this.db
         .prepare("UPDATE products SET name=?, category=?, unitDefault=?, pricePerUnit=?, prepNotes=?, department=?, lowStockThreshold=?, barcode=?, isRawIntake=?, updatedAt=? WHERE id=?")
         .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, input.lowStockThreshold ?? null, barcode, isRawIntake, now, input.id);
@@ -148,8 +155,12 @@ export class KotDatabase {
     } else {
       const result = this.db
         .prepare("INSERT INTO products (name, category, unitDefault, pricePerUnit, prepNotes, department, lowStockThreshold, barcode, isRawIntake, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)")
-        .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, input.lowStockThreshold ?? null, barcode, isRawIntake, now, now);
-      return this.db.prepare("SELECT * FROM products WHERE id = ?").get(Number(result.lastInsertRowid)) as Product;
+        .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, input.lowStockThreshold ?? null, providedBarcode, isRawIntake, now, now);
+      const newId = Number(result.lastInsertRowid);
+      if (!providedBarcode) {
+        this.db.prepare("UPDATE products SET barcode = ? WHERE id = ?").run(generateInternalBarcode(newId), newId);
+      }
+      return this.db.prepare("SELECT * FROM products WHERE id = ?").get(newId) as Product;
     }
   }
 

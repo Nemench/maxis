@@ -18,18 +18,11 @@
 //   digits 8-12: price   Rand.cents, e.g. "07056" -> R70.56
 //   digit 13:    check   standard EAN-13 check digit over digits 1-12
 
+import { ean13CheckDigit } from "./ean13";
+
 export interface WeighBarcode {
   plu: string;
   price: number;
-}
-
-function ean13CheckDigit(first12Digits: string): number {
-  let sum = 0;
-  for (let i = 0; i < 12; i++) {
-    const d = Number(first12Digits[i]);
-    sum += i % 2 === 0 ? d : d * 3;
-  }
-  return (10 - (sum % 10)) % 10;
 }
 
 export function parseWeighBarcode(code: string): WeighBarcode | null {
