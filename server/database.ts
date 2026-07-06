@@ -13,9 +13,11 @@ import type {
   User, UserInput,
   Department, DeptStatus, DeliveryAddress,
   Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput,
-  StockLocation, ProductStockRow, ItemSalesStat, ItemStockMovementStat, StatisticsOverview
+  StockLocation, ProductStockRow, ItemSalesStat, ItemStockMovementStat, StatisticsOverview,
+  MarginStat, MarginOverview
 } from "../src/shared/types.js";
 import { generateInternalBarcode } from "../src/shared/internalBarcode.js";
+import { weightedMarginPct } from "../src/shared/margin.js";
 
 export class KotDatabase {
   private db!: BetterSqlite3.Database;
@@ -119,12 +121,58 @@ export class KotDatabase {
   // tracking) and no longer updated; the authoritative per-location count
   // timestamp/user lives on each product_stock row instead.
 
+  // Correlated subquery for the most recent product_cost_history row per
+  // product — appended to every query that returns a Product, since
+  // currentCost is derived, not a column. `alias` lets callers that don't
+  // use "p" as their products-table alias (there are none currently, but
+  // keeps this from silently breaking if that changes) pass their own.
+  private static currentCostSql(alias = "p"): string {
+    return `(SELECT costPerUnit FROM product_cost_history pch WHERE pch.productId = ${alias}.id ORDER BY pch.effectiveFrom DESC, pch.id DESC LIMIT 1) as currentCost`;
+  }
+
+  getCurrentCost(productId: number): number | null {
+    const row = this.db
+      .prepare("SELECT costPerUnit FROM product_cost_history WHERE productId = ? ORDER BY effectiveFrom DESC, id DESC LIMIT 1")
+      .get(productId) as { costPerUnit: number } | undefined;
+    return row?.costPerUnit ?? null;
+  }
+
+  // Appends a new cost-history row rather than updating one in place — see
+  // the product_cost_history table comment for why (a sale must be able to
+  // snapshot whatever cost was current *then*, even after it changes again).
+  setProductCost(productId: number, costPerUnit: number, createdById: number | null): void {
+    if (costPerUnit < 0) throw new Error("Cost price can't be negative");
+    const now = new Date().toISOString();
+    this.db
+      .prepare("INSERT INTO product_cost_history (productId, costPerUnit, effectiveFrom, createdById, createdAt) VALUES (?, ?, ?, ?, ?)")
+      .run(productId, costPerUnit, now, createdById, now);
+  }
+
+  // Active products that have never had a cost recorded — the admin
+  // "Products needing cost price" list. Deliberately not "cost is 0",
+  // since 0 is a real (if unusual) cost and shouldn't be conflated with
+  // "nobody has entered one yet."
+  listProductsMissingCost(): Product[] {
+    return this.db
+      .prepare(`
+        SELECT p.id, p.name, p.category, p.unitDefault, p.pricePerUnit, p.prepNotes, p.department, p.isActive,
+               p.lowStockThreshold, COALESCE(SUM(ps.qty), 0) as onHandQty, p.lastCountedAt, p.lastCountedById,
+               p.barcode, p.isRawIntake, p.createdAt, p.updatedAt, ${KotDatabase.currentCostSql()}
+        FROM products p
+        LEFT JOIN product_stock ps ON ps.productId = p.id
+        WHERE p.isActive = 1
+        GROUP BY p.id
+        HAVING currentCost IS NULL
+        ORDER BY p.category, p.name`)
+      .all() as Product[];
+  }
+
   listProducts(): Product[] {
     return this.db
       .prepare(`
         SELECT p.id, p.name, p.category, p.unitDefault, p.pricePerUnit, p.prepNotes, p.department, p.isActive,
                p.lowStockThreshold, COALESCE(SUM(ps.qty), 0) as onHandQty, p.lastCountedAt, p.lastCountedById,
-               p.barcode, p.isRawIntake, p.createdAt, p.updatedAt
+               p.barcode, p.isRawIntake, p.createdAt, p.updatedAt, ${KotDatabase.currentCostSql()}
         FROM products p
         LEFT JOIN product_stock ps ON ps.productId = p.id
         WHERE p.isActive = 1
@@ -134,7 +182,9 @@ export class KotDatabase {
   }
 
   getProductByBarcode(barcode: string): Product | null {
-    return this.db.prepare("SELECT * FROM products WHERE barcode = ? AND isActive = 1").get(barcode) as Product | null;
+    return this.db
+      .prepare(`SELECT p.*, ${KotDatabase.currentCostSql()} FROM products p WHERE p.barcode = ? AND p.isActive = 1`)
+      .get(barcode) as Product | null;
   }
 
   // If no barcode is entered, one is auto-generated from the product's own
@@ -142,6 +192,11 @@ export class KotDatabase {
   // ends up scannable, whether or not it has a real manufacturer barcode.
   // For a brand-new product the id doesn't exist until after the INSERT,
   // so that case generates it in a follow-up UPDATE rather than up front.
+  //
+  // costPerUnit is handled separately from the rest of the fields: if
+  // provided, it appends a new product_cost_history row (see
+  // setProductCost) via the caller (routes/products.ts), not here — this
+  // method only touches the products table itself.
   upsertProduct(input: ProductInput): Product {
     const now = new Date().toISOString();
     const providedBarcode = input.barcode?.trim() || null;
@@ -151,7 +206,7 @@ export class KotDatabase {
       this.db
         .prepare("UPDATE products SET name=?, category=?, unitDefault=?, pricePerUnit=?, prepNotes=?, department=?, lowStockThreshold=?, barcode=?, isRawIntake=?, updatedAt=? WHERE id=?")
         .run(input.name.trim(), input.category.trim(), input.unitDefault, input.pricePerUnit ?? null, input.prepNotes.trim(), input.department, input.lowStockThreshold ?? null, barcode, isRawIntake, now, input.id);
-      return this.db.prepare("SELECT * FROM products WHERE id = ?").get(input.id) as Product;
+      return this.db.prepare(`SELECT p.*, ${KotDatabase.currentCostSql()} FROM products p WHERE p.id = ?`).get(input.id) as Product;
     } else {
       const result = this.db
         .prepare("INSERT INTO products (name, category, unitDefault, pricePerUnit, prepNotes, department, lowStockThreshold, barcode, isRawIntake, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)")
@@ -160,7 +215,7 @@ export class KotDatabase {
       if (!providedBarcode) {
         this.db.prepare("UPDATE products SET barcode = ? WHERE id = ?").run(generateInternalBarcode(newId), newId);
       }
-      return this.db.prepare("SELECT * FROM products WHERE id = ?").get(newId) as Product;
+      return this.db.prepare(`SELECT p.*, ${KotDatabase.currentCostSql()} FROM products p WHERE p.id = ?`).get(newId) as Product;
     }
   }
 
@@ -191,7 +246,7 @@ export class KotDatabase {
       .prepare(`
         SELECT p.id, p.name, p.category, p.unitDefault, p.pricePerUnit, p.prepNotes, p.department, p.isActive,
                p.lowStockThreshold, COALESCE(SUM(ps.qty), 0) as onHandQty, p.lastCountedAt, p.lastCountedById,
-               p.barcode, p.isRawIntake, p.createdAt, p.updatedAt
+               p.barcode, p.isRawIntake, p.createdAt, p.updatedAt, ${KotDatabase.currentCostSql()}
         FROM products p
         LEFT JOIN product_stock ps ON ps.productId = p.id
         WHERE p.isActive = 1 AND p.lowStockThreshold IS NOT NULL
@@ -605,16 +660,40 @@ export class KotDatabase {
     }
     const cashTendered = paymentMethod === "cash" ? (input.cashTendered ?? null) : null;
 
+    // Every catalog item in a completed (POS) sale must have a recorded
+    // cost price — enforced here, not just the POS grid disabling the tap,
+    // for the same "client isn't the real boundary" reason as the R5,000
+    // check above. Computed once per item and reused below so a sale can't
+    // half-complete with some lines costed and others not. Free-text lines
+    // (no productId) have nothing to check against and are always allowed.
+    const costPerItem = new Map<number, number | null>();
+    for (const item of input.items) {
+      if (!item.productId || costPerItem.has(item.productId)) continue;
+      costPerItem.set(item.productId, this.getCurrentCost(item.productId));
+    }
+    if (doneNow) {
+      for (const item of input.items) {
+        if (item.productId && costPerItem.get(item.productId) == null) {
+          throw new Error(`"${item.name}" has no cost price set — add one in Stock before it can be sold`);
+        }
+      }
+    }
+
     const result = this.db
       .prepare("INSERT INTO orders (ticketNumber, customerName, customerPhone, orderType, deliveryAddress, requestedTime, assignedTo, status, kitchenStatus, counterStatus, requestedById, createdAt, updatedAt, discountAmount, paymentMethod, cashTendered) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(ticketNumber, input.customerName.trim(), input.customerPhone.trim(), input.orderType, input.orderType === "delivery" || input.deliveryAddress?.street ? JSON.stringify(input.deliveryAddress) : "{}", input.requestedTime.trim(), input.assignedTo?.trim() || null, overallStatus, kitchenStatus, counterStatus, requestedById, now, now, discountAmount, paymentMethod, cashTendered);
 
     const orderId = Number(result.lastInsertRowid);
     const insertItem = this.db.prepare(
-      "INSERT INTO order_items (orderId, productId, name, kg, quantity, notes, unitPrice, lineTotal, wantedPrice, department) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO order_items (orderId, productId, name, kg, quantity, notes, unitPrice, lineTotal, wantedPrice, department, costAtSale) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     );
     for (const item of input.items) {
-      insertItem.run(orderId, item.productId ?? null, item.name.trim(), item.kg ?? null, item.quantity ?? null, item.notes.trim(), item.unitPrice ?? null, item.lineTotal ?? null, item.wantedPrice ?? null, item.department);
+      // Total cost for the line (matching lineTotal being a total, not a
+      // per-unit figure) — the cost snapshotted now, at sale time, not
+      // whatever product_cost_history says later when a report reads it.
+      const unitCost = item.productId ? costPerItem.get(item.productId) : null;
+      const costAtSale = unitCost != null ? unitCost * (item.kg || item.quantity || 1) : null;
+      insertItem.run(orderId, item.productId ?? null, item.name.trim(), item.kg ?? null, item.quantity ?? null, item.notes.trim(), item.unitPrice ?? null, item.lineTotal ?? null, item.wantedPrice ?? null, item.department, costAtSale);
     }
 
     // A completeImmediately order is a finished POS sale (see the
@@ -666,7 +745,7 @@ export class KotDatabase {
              o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, o.paymentMethod, o.cashTendered, u.name as requestedByName,
              oi.id as oi_id, oi.productId as oi_productId, oi.name as oi_name,
              oi.kg as oi_kg, oi.quantity as oi_quantity, oi.notes as oi_notes,
-             oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept
+             oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept, oi.costAtSale as oi_costAtSale
       FROM orders o
       LEFT JOIN users u ON o.requestedById = u.id
       LEFT JOIN order_items oi ON o.id = oi.orderId`;
@@ -702,7 +781,7 @@ export class KotDatabase {
              o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, o.paymentMethod, o.cashTendered, u.name as requestedByName,
              oi.id as oi_id, oi.productId as oi_productId, oi.name as oi_name,
              oi.kg as oi_kg, oi.quantity as oi_quantity, oi.notes as oi_notes,
-             oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept
+             oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept, oi.costAtSale as oi_costAtSale
       FROM orders o
       LEFT JOIN users u ON o.requestedById = u.id
       LEFT JOIN order_items oi ON o.id = oi.orderId
@@ -856,6 +935,64 @@ export class KotDatabase {
     };
   }
 
+  // Only order_items with a snapshotted costAtSale are included — a
+  // free-text line (no productId) or a sale from before this feature
+  // existed has no known cost, and reporting it at cost=0 would overstate
+  // margin rather than honestly excluding it. These same lines still count
+  // in the ordinary (non-margin) Statistics revenue views.
+  private marginsByGroup(from: string, to: string, groupBy: "product" | "category" | "day"): MarginStat[] {
+    const groupExpr = groupBy === "day" ? "substr(o.createdAt, 1, 10)" : groupBy === "category" ? "p.category" : "oi.productId";
+    const labelExpr = groupBy === "day" ? "substr(o.createdAt, 1, 10)" : groupBy === "category" ? "p.category" : "oi.name";
+    const productJoin = groupBy === "category" ? "JOIN products p ON p.id = oi.productId" : "";
+    const rows = this.db
+      .prepare(`
+        SELECT CAST(${groupExpr} as TEXT) as id, ${labelExpr} as label,
+               COALESCE(SUM(oi.lineTotal), 0) as revenue,
+               COALESCE(SUM(oi.costAtSale), 0) as cost,
+               COALESCE(SUM(COALESCE(oi.quantity, 0) + COALESCE(oi.kg, 0)), 0) as qtySold
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.orderId
+        ${productJoin}
+        WHERE oi.costAtSale IS NOT NULL AND substr(o.createdAt, 1, 10) >= ? AND substr(o.createdAt, 1, 10) <= ?
+        GROUP BY ${groupExpr}
+        ORDER BY revenue DESC`)
+      .all(from, to) as { id: string; label: string; revenue: number; cost: number; qtySold: number }[];
+    return rows.map((r) => ({ ...r, profit: r.revenue - r.cost, marginPct: weightedMarginPct(r.revenue, r.cost) }));
+  }
+
+  getMarginOverview(from: string, to: string, groupBy: "product" | "category" | "day"): MarginOverview {
+    const current = this.marginsByGroup(from, to, groupBy);
+
+    const totals = (f: string, t: string) => this.db
+      .prepare(`
+        SELECT COALESCE(SUM(oi.lineTotal), 0) as revenue, COALESCE(SUM(oi.costAtSale), 0) as cost
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.orderId
+        WHERE oi.costAtSale IS NOT NULL AND substr(o.createdAt, 1, 10) >= ? AND substr(o.createdAt, 1, 10) <= ?`)
+      .get(f, t) as { revenue: number; cost: number };
+
+    const days = Math.round((new Date(`${to}T00:00:00Z`).getTime() - new Date(`${from}T00:00:00Z`).getTime()) / 86400000) + 1;
+    const shift = (d: string, n: number) => new Date(new Date(`${d}T00:00:00Z`).getTime() + n * 86400000).toISOString().slice(0, 10);
+    const prevTo = shift(from, -1);
+    const prevFrom = shift(prevTo, -(days - 1));
+
+    const cur = totals(from, to);
+    const prev = totals(prevFrom, prevTo);
+
+    // The trend chart is always by day regardless of what grouping the
+    // caller asked for in `current` — re-running the query is cheap at
+    // this scale and keeps the two independent.
+    const trend = (groupBy === "day" ? current : this.marginsByGroup(from, to, "day"))
+      .map((r) => ({ date: r.id, revenue: r.revenue, cost: r.cost, profit: r.profit, marginPct: r.marginPct }));
+
+    return {
+      current,
+      overallMarginPct: weightedMarginPct(cur.revenue, cur.cost),
+      prevOverallMarginPct: weightedMarginPct(prev.revenue, prev.cost),
+      trend
+    };
+  }
+
   getOrder(id: number): Order {
     const order = this.db
       .prepare("SELECT o.*, u.name as requestedByName FROM orders o LEFT JOIN users u ON o.requestedById = u.id WHERE o.id = ?")
@@ -876,9 +1013,11 @@ export class KotDatabase {
   addOrderItem(orderId: number, item: OrderItemInput): Order {
     const order = this.getOrder(orderId);
     if (order.status === "Done") throw new Error("Cannot add items to a completed order");
+    const unitCost = item.productId ? this.getCurrentCost(item.productId) : null;
+    const costAtSale = unitCost != null ? unitCost * (item.kg || item.quantity || 1) : null;
     this.db
-      .prepare("INSERT INTO order_items (orderId, productId, name, kg, quantity, notes, unitPrice, lineTotal, wantedPrice, department) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(orderId, item.productId ?? null, item.name.trim(), item.kg ?? null, item.quantity ?? null, item.notes.trim(), item.unitPrice ?? null, item.lineTotal ?? null, item.wantedPrice ?? null, item.department);
+      .prepare("INSERT INTO order_items (orderId, productId, name, kg, quantity, notes, unitPrice, lineTotal, wantedPrice, department, costAtSale) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(orderId, item.productId ?? null, item.name.trim(), item.kg ?? null, item.quantity ?? null, item.notes.trim(), item.unitPrice ?? null, item.lineTotal ?? null, item.wantedPrice ?? null, item.department, costAtSale);
     this.db.prepare("UPDATE orders SET updatedAt = ? WHERE id = ?").run(new Date().toISOString(), orderId);
     return this.getOrder(orderId);
   }
@@ -939,6 +1078,7 @@ export class KotDatabase {
           lineTotal: row.oi_lineTotal as number | null,
           wantedPrice: row.oi_wantedPrice as number | null,
           department: row.oi_dept as Department,
+          costAtSale: row.oi_costAtSale as number | null,
         });
       }
     }
@@ -953,7 +1093,7 @@ export class KotDatabase {
 
   private listOrderItems(orderId: number): OrderItem[] {
     return this.db
-      .prepare("SELECT id, orderId, productId, name, kg, quantity, notes, unitPrice, lineTotal, wantedPrice, department FROM order_items WHERE orderId = ? ORDER BY id ASC")
+      .prepare("SELECT id, orderId, productId, name, kg, quantity, notes, unitPrice, lineTotal, wantedPrice, department, costAtSale FROM order_items WHERE orderId = ? ORDER BY id ASC")
       .all(orderId) as OrderItem[];
   }
 
@@ -1048,6 +1188,7 @@ export class KotDatabase {
     if (orderItemsExists) {
       const oiCols = (this.db.prepare("PRAGMA table_info(order_items)").all() as { name: string }[]).map((c) => c.name);
       if (!oiCols.includes("wantedPrice")) this.db.exec("ALTER TABLE order_items ADD COLUMN wantedPrice REAL");
+      if (!oiCols.includes("costAtSale")) this.db.exec("ALTER TABLE order_items ADD COLUMN costAtSale REAL");
     }
 
     // Needed before the CREATE TABLE below runs (which would otherwise make
@@ -1120,7 +1261,8 @@ export class KotDatabase {
         unitPrice REAL,
         lineTotal REAL,
         wantedPrice REAL,
-        department TEXT NOT NULL DEFAULT 'counter'
+        department TEXT NOT NULL DEFAULT 'counter',
+        costAtSale REAL
       );
 
       CREATE TABLE IF NOT EXISTS settings (
@@ -1156,6 +1298,19 @@ export class KotDatabase {
         createdAt TEXT NOT NULL
       );
 
+      -- One row per cost change, not a single mutable field on products —
+      -- "current cost" is the most recent row per product (see
+      -- getCurrentCost), so a sale always has a historical cost to snapshot
+      -- (order_items.costAtSale) even after the cost later changes again.
+      CREATE TABLE IF NOT EXISTS product_cost_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        productId INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        costPerUnit REAL NOT NULL,
+        effectiveFrom TEXT NOT NULL,
+        createdById INTEGER REFERENCES users(id),
+        createdAt TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS stock_locations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -1181,6 +1336,7 @@ export class KotDatabase {
       CREATE INDEX IF NOT EXISTS idx_wil_createdAt ON weigh_in_lines(createdAt DESC);
       CREATE INDEX IF NOT EXISTS idx_wib_status    ON weigh_in_batches(status);
       CREATE INDEX IF NOT EXISTS idx_pstock_location ON product_stock(locationId);
+      CREATE INDEX IF NOT EXISTS idx_cost_product_effective ON product_cost_history(productId, effectiveFrom DESC);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_prod_barcode ON products(barcode) WHERE barcode IS NOT NULL;
     `);
 

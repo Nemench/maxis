@@ -2,7 +2,7 @@
 // req()/download(), which attach the JWT and centrally handle a 401 (token
 // missing/expired) by clearing it and forcing a reload back to the login screen.
 import { Capacitor } from "@capacitor/core";
-import type { User, UserInput, Product, ProductInput, QuickCreateProductInput, Order, OrderItemInput, CreateOrderInput, OrderStatus, Department, DeptStatus, Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput, StockLocation, ProductStockRow, ItemSalesStat, ItemStockMovementStat, StatisticsOverview } from "../shared/types";
+import type { User, UserInput, Product, ProductInput, QuickCreateProductInput, Order, OrderItemInput, CreateOrderInput, OrderStatus, Department, DeptStatus, Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput, StockLocation, ProductStockRow, ItemSalesStat, ItemStockMovementStat, StatisticsOverview, MarginOverview } from "../shared/types";
 import { tokenStorage } from "./tokenStorage";
 import { NATIVE_SERVER_URL } from "../shared/nativeServer";
 
@@ -81,7 +81,8 @@ export const api = {
     import: (csv: string) => req<{ imported: number; errors: string[] }>("POST", "/products/import", { csv }),
     export: () => download("/products/export", `maxis-products-${new Date().toISOString().slice(0, 10)}.csv`),
     getByBarcode: (code: string) => req<Product>("GET", `/products/barcode/${encodeURIComponent(code)}`),
-    quickCreate: (data: QuickCreateProductInput) => req<Product>("POST", "/products/quick-create", data)
+    quickCreate: (data: QuickCreateProductInput) => req<Product>("POST", "/products/quick-create", data),
+    missingCost: () => req<Product[]>("GET", "/products/missing-cost")
   },
   backup: {
     download: () => download("/backup", `maxis-backup-${new Date().toISOString().slice(0, 10)}.json`),
@@ -139,6 +140,8 @@ export const api = {
   statistics: {
     sales: (from: string, to: string) => req<ItemSalesStat[]>("GET", `/statistics/sales?from=${from}&to=${to}`),
     stockMovement: (from: string, to: string) => req<ItemStockMovementStat[]>("GET", `/statistics/stock-movement?from=${from}&to=${to}`),
-    overview: (from: string, to: string) => req<StatisticsOverview>("GET", `/statistics/overview?from=${from}&to=${to}`)
+    overview: (from: string, to: string) => req<StatisticsOverview>("GET", `/statistics/overview?from=${from}&to=${to}`),
+    margins: (from: string, to: string, groupBy: "product" | "category" | "day") =>
+      req<MarginOverview>("GET", `/statistics/margins?from=${from}&to=${to}&group_by=${groupBy}`)
   }
 };

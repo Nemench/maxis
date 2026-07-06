@@ -597,6 +597,32 @@ th {
   grid-column: 1 / -1;
 }
 
+.missing-cost-widget {
+  border-color: var(--red);
+}
+
+.missing-cost-widget h3 {
+  margin: 0 0 4px;
+  color: var(--red);
+}
+
+.missing-cost-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.missing-cost-chip {
+  padding: 6px 12px;
+  border: 1px solid var(--red);
+  border-radius: 999px;
+  background: var(--red-light);
+  color: var(--red);
+  font-weight: 600;
+  font-size: 13px;
+}
+
 .product-form {
   display: grid;
   gap: 12px;
@@ -723,6 +749,12 @@ th {
   font-weight: 600;
   margin-top: 8px;
 }
+
+.margin-negative {
+  color: var(--red);
+  font-weight: 700;
+}
+
 /* ── Login ── */
 .login-screen {
   display: grid;
@@ -1785,6 +1817,20 @@ button.sm {
 .pos-product-price {
   font-size: 12px;
   color: var(--muted);
+}
+
+.pos-product-tile-nocost {
+  opacity: 0.55;
+  border-style: dashed;
+  border-color: var(--red);
+}
+
+.pos-product-nocost-flag {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--red);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
 }
 
 .pos-receipt {

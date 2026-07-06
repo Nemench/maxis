@@ -16,6 +16,11 @@ const canQuickCreate = (req: AuthRequest) =>
 
 router.get("/", (_req, res) => { res.json(db.listProducts()); });
 
+// Admin dashboard widget: active products with no cost price ever
+// recorded (see listProductsMissingCost) — deliberately never auto-filled
+// with 0, so these need someone to actually enter a real number.
+router.get("/missing-cost", requireAdmin, (_req, res) => { res.json(db.listProductsMissingCost()); });
+
 // Barcode lookup for the "scan to add to order" flow. Any authenticated
 // user can look up (read-only, same posture as GET / above).
 router.get("/barcode/:code", (req, res) => {
@@ -38,15 +43,34 @@ router.post("/quick-create", (req: AuthRequest, res) => {
   }
 });
 
+// Only inserts a new product_cost_history row when the cost actually
+// changed — the edit form resubmits editing.costPerUnit on every save
+// (even one only touching an unrelated field, or the barcode-regenerate
+// action), and cost_history is meant to track real changes over time, not
+// grow a duplicate row every time someone saves the form unchanged.
+function maybeUpdateCost(productId: number, costPerUnit: number | null | undefined, createdById: number): void {
+  if (costPerUnit == null) return;
+  if (db.getCurrentCost(productId) === costPerUnit) return;
+  db.setProductCost(productId, costPerUnit, createdById);
+}
+
 // Only admins may create, update, or delete products
-router.post("/", requireAdmin, (req, res) => {
-  try { res.status(201).json(db.upsertProduct(req.body as ProductInput)); }
-  catch (err) { res.status(400).json({ message: err instanceof Error ? err.message : "Failed to save product" }); }
+router.post("/", requireAdmin, (req: AuthRequest, res) => {
+  try {
+    const input = req.body as ProductInput;
+    const product = db.upsertProduct(input);
+    maybeUpdateCost(product.id, input.costPerUnit, req.user!.id);
+    res.status(201).json(input.costPerUnit != null ? { ...product, currentCost: input.costPerUnit } : product);
+  } catch (err) { res.status(400).json({ message: err instanceof Error ? err.message : "Failed to save product" }); }
 });
 
-router.put("/:id", requireAdmin, (req, res) => {
-  try { res.json(db.upsertProduct({ ...req.body, id: Number(req.params.id) } as ProductInput)); }
-  catch (err) { res.status(400).json({ message: err instanceof Error ? err.message : "Failed to update product" }); }
+router.put("/:id", requireAdmin, (req: AuthRequest, res) => {
+  try {
+    const input = { ...req.body, id: Number(req.params.id) } as ProductInput;
+    const product = db.upsertProduct(input);
+    maybeUpdateCost(product.id, input.costPerUnit, req.user!.id);
+    res.json(input.costPerUnit != null ? { ...product, currentCost: input.costPerUnit } : product);
+  } catch (err) { res.status(400).json({ message: err instanceof Error ? err.message : "Failed to update product" }); }
 });
 
 router.delete("/:id", requireAdmin, (req, res) => {

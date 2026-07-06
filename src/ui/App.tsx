@@ -49,6 +49,7 @@ import type {
   ItemSalesStat,
   ItemStockMovementStat,
   StatisticsOverview,
+  MarginOverview,
   Order,
   OrderItemInput,
   Product,
@@ -676,7 +677,11 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
   // where "tap 3 times" is the natural touch gesture) or adds a new 1kg line
   // (weight-priced items, where the weight still needs confirming/editing —
   // see the stepper below) rather than trying to guess a sensible default kg.
+  // Blocked entirely for a product with no recorded cost price — the
+  // server enforces this too (see createOrder's cost check), this is just
+  // the earlier, friendlier stop.
   const addToCart = (p: Product) => {
+    if (p.currentCost == null) { setError(`"${p.name}" has no cost price set — add one in Stock before selling it.`); return; }
     setCart((cur) => {
       if (p.unitDefault === "qty") {
         const idx = cur.findIndex((i) => i.productId === p.id);
@@ -783,10 +788,16 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
         </div>
         <div className="pos-product-grid">
           {visibleProducts.map((p) => (
-            <button key={p.id} type="button" className="pos-product-tile" onClick={() => addToCart(p)}>
+            <button
+              key={p.id} type="button"
+              className={`pos-product-tile ${p.currentCost == null ? "pos-product-tile-nocost" : ""}`}
+              onClick={() => addToCart(p)}
+              title={p.currentCost == null ? "No cost price set — can't be sold yet" : undefined}
+            >
               <span className={`pos-product-badge ${categoryBadgeClass(p.category || "Other")}`}>{initials(p.name)}</span>
               <span className="pos-product-name">{p.name}</span>
               <span className="pos-product-price">{p.pricePerUnit != null ? `${currency.format(p.pricePerUnit)}${p.unitDefault === "qty" ? " ea" : "/kg"}` : "—"}</span>
+              {p.currentCost == null && <span className="pos-product-nocost-flag">No cost price</span>}
             </button>
           ))}
           {visibleProducts.length === 0 && <p className="report-empty">No items match.</p>}
@@ -1527,12 +1538,33 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
   const [stockMessage, setStockMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [weighScanOpen, setWeighScanOpen] = useState(false);
+  const [missingCost, setMissingCost] = useState<Product[]>([]);
   const categories = useMemo(() => [...new Set(products.map((p) => p.category).filter(Boolean))], [products]);
+
+  const loadMissingCost = () => { api.products.missingCost().then(setMissingCost).catch(() => undefined); };
+  useEffect(() => { loadMissingCost(); }, []);
+
+  // Editing an existing row needs its current cost pulled in from the
+  // derived Product.currentCost field (a different name/shape than
+  // ProductInput.costPerUnit, which is "the value to write on save") —
+  // otherwise the cost field would show blank for a product that already
+  // has one recorded.
+  const editProduct = (p: Product) => setEditing({ ...p, costPerUnit: p.currentCost });
+
+  const belowCost = editing.pricePerUnit != null && editing.costPerUnit != null && editing.pricePerUnit < editing.costPerUnit;
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
     const name = editing.name.trim();
     if (!name) { setStockMessage("Enter a name."); return; }
+    // Required going forward for brand-new products only — an existing
+    // product missing its cost isn't blocked from other edits here, it
+    // just keeps showing up in "Products needing cost price" below until
+    // someone deliberately fills it in (never silently defaulted to 0).
+    if (!editing.id && (editing.costPerUnit == null || editing.costPerUnit === undefined)) {
+      setStockMessage("Enter a cost price — required for new items.");
+      return;
+    }
     setBusy(true); setStockMessage("");
     try {
       const saved = await api.products.save({ ...editing, name, unitDefault: "kg", category: editing.category.trim() || "General", prepNotes: editing.prepNotes.trim() });
@@ -1540,8 +1572,9 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
       // EMPTY_PRODUCT) so a barcode auto-generated on this save — see
       // upsertProduct — is immediately visible/printable, not silently
       // applied somewhere the admin has to go looking for it.
-      setEditing(saved);
+      setEditing({ ...saved, costPerUnit: saved.currentCost });
       setStockMessage("Saved.");
+      loadMissingCost();
     } catch (err) {
       setStockMessage(err instanceof Error ? err.message : "Could not save.");
       return;
@@ -1563,8 +1596,11 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
     if (!editing.id) return;
     setBusy(true); setStockMessage("");
     try {
-      const saved = await api.products.save({ ...editing, barcode: generateInternalBarcode(editing.id) });
-      setEditing(saved);
+      // costPerUnit deliberately omitted — this action only changes the
+      // barcode, and resubmitting the form's current cost value would
+      // otherwise insert a needless duplicate cost_history row.
+      const saved = await api.products.save({ ...editing, barcode: generateInternalBarcode(editing.id), costPerUnit: undefined });
+      setEditing({ ...saved, costPerUnit: saved.currentCost });
       setStockMessage("Barcode regenerated.");
       await onChanged().catch(() => undefined);
     } catch (err) {
@@ -1579,6 +1615,17 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
 
   return (
     <div className="products-layout">
+      {missingCost.length > 0 && (
+        <div className="panel missing-cost-widget span-full">
+          <h3>Products needing cost price ({missingCost.length})</h3>
+          <p className="settings-hint">These are sellable via POS, but have never had a cost price recorded — margin reports can't account for them until one is entered.</p>
+          <div className="missing-cost-list">
+            {missingCost.map((p) => (
+              <button type="button" key={p.id} className="missing-cost-chip" onClick={() => editProduct(p)}>{p.name}</button>
+            ))}
+          </div>
+        </div>
+      )}
       <form className="panel product-form" onSubmit={(e) => void save(e)}>
         <h2>{editing.id ? "Edit item" : "Add item"}</h2>
         <label>Name<input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} required /></label>
@@ -1595,9 +1642,20 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
           </select>
         </label>
         <label>
-          R/kg
+          R/kg (sell price)
           <input type="number" min="0" step="0.01" value={editing.pricePerUnit ?? ""} onChange={(e) => setEditing({ ...editing, pricePerUnit: e.target.value ? Number(e.target.value) : null })} />
         </label>
+        <label>
+          Cost price {!editing.id && <span className="optional-hint">(required)</span>}
+          <input
+            type="number" min="0" step="0.01" value={editing.costPerUnit ?? ""}
+            onChange={(e) => setEditing({ ...editing, costPerUnit: e.target.value ? Number(e.target.value) : null })}
+            placeholder={editing.id ? "Not yet recorded" : "Required for a new item"}
+          />
+        </label>
+        {belowCost && (
+          <p className="form-error">Sell price is below cost price — this item would sell at a loss.</p>
+        )}
         <label>Prep notes<textarea value={editing.prepNotes} onChange={(e) => setEditing({ ...editing, prepNotes: e.target.value })} /></label>
         <label>
           Barcode / scale PLU <span className="optional-hint">(optional — auto-generated on save if left blank)</span>
@@ -1655,7 +1713,7 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
                   <td>{p.onHandQty}{low && <span className="low-stock-badge">Low</span>}</td>
                   <td>{p.prepNotes}</td>
                   <td className="row-actions">
-                    <button type="button" className="secondary" onClick={() => setEditing(p)}>Edit</button>
+                    <button type="button" className="secondary" onClick={() => editProduct(p)}>Edit</button>
                     <button type="button" className="icon-button danger" onClick={() => void remove(p.id, p.name)} title="Delete"><Trash2 size={18} /></button>
                   </td>
                 </tr>
@@ -3024,6 +3082,7 @@ function ReportsPanel() {
 type SortDir = "asc" | "desc";
 type SalesSortKey = "name" | "orderCount" | "totalQty" | "totalKg" | "totalRevenue";
 type MoveSortKey = "productName" | "totalPiecesReceived" | "totalKgReceived" | "currentOnHand";
+type MarginSortKey = "label" | "revenue" | "cost" | "profit" | "marginPct" | "qtySold";
 
 function StatisticsPanel() {
   const today = new Date().toISOString().slice(0, 10);
@@ -3036,6 +3095,9 @@ function StatisticsPanel() {
   const [error, setError] = useState("");
   const [salesSort, setSalesSort] = useState<{ key: SalesSortKey; dir: SortDir }>({ key: "totalRevenue", dir: "desc" });
   const [moveSort, setMoveSort] = useState<{ key: MoveSortKey; dir: SortDir }>({ key: "totalKgReceived", dir: "desc" });
+  const [margins, setMargins] = useState<MarginOverview | null>(null);
+  const [marginGroupBy, setMarginGroupBy] = useState<"product" | "category">("product");
+  const [marginSort, setMarginSort] = useState<{ key: MarginSortKey; dir: SortDir }>({ key: "profit", dir: "desc" });
 
   const applyPreset = (preset: "today" | "week" | "month" | "all") => {
     const now = new Date();
@@ -3055,8 +3117,11 @@ function StatisticsPanel() {
     if (from > to) { setError("'From' must be on or before 'To'"); return; }
     setLoading(true); setError("");
     try {
-      const [s, m, o] = await Promise.all([api.statistics.sales(from, to), api.statistics.stockMovement(from, to), api.statistics.overview(from, to)]);
-      setSales(s); setMovement(m); setOverview(o);
+      const [s, m, o, mg] = await Promise.all([
+        api.statistics.sales(from, to), api.statistics.stockMovement(from, to), api.statistics.overview(from, to),
+        api.statistics.margins(from, to, marginGroupBy)
+      ]);
+      setSales(s); setMovement(m); setOverview(o); setMargins(mg);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load statistics");
     } finally {
@@ -3065,6 +3130,13 @@ function StatisticsPanel() {
   };
 
   useEffect(() => { void load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Only re-fetches the margins breakdown (not the whole date-range
+  // reload) when the grouping toggle changes — from/to stay the same.
+  useEffect(() => {
+    api.statistics.margins(from, to, marginGroupBy).then(setMargins).catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marginGroupBy]);
 
   const sortedSales = useMemo(() => {
     const dir = salesSort.dir === "asc" ? 1 : -1;
@@ -3084,6 +3156,15 @@ function StatisticsPanel() {
     setSalesSort((cur) => (cur.key === key ? { key, dir: cur.dir === "asc" ? "desc" : "asc" } : { key, dir: "desc" }));
   const toggleMoveSort = (key: MoveSortKey) =>
     setMoveSort((cur) => (cur.key === key ? { key, dir: cur.dir === "asc" ? "desc" : "asc" } : { key, dir: "desc" }));
+
+  const sortedMargins = useMemo(() => {
+    const dir = marginSort.dir === "asc" ? 1 : -1;
+    return [...(margins?.current ?? [])].sort((a, b) =>
+      marginSort.key === "label" ? a.label.localeCompare(b.label) * dir : (a[marginSort.key] - b[marginSort.key]) * dir
+    );
+  }, [margins, marginSort]);
+  const toggleMarginSort = (key: MarginSortKey) =>
+    setMarginSort((cur) => (cur.key === key ? { key, dir: cur.dir === "asc" ? "desc" : "asc" } : { key, dir: "desc" }));
 
   const salesChartData = (sales ?? []).slice(0, 10).map((s) => ({ label: s.name, value: s.totalRevenue }));
   const salesRevenueTotal = (sales ?? []).reduce((sum, s) => sum + s.totalRevenue, 0);
@@ -3142,6 +3223,57 @@ function StatisticsPanel() {
               />
             </div>
           </div>
+        </>
+      )}
+
+      {margins && (
+        <>
+          <h3 className="stats-section-title">Profit margin</h3>
+          <div className="kpi-row">
+            <MarginSummaryCard current={margins.overallMarginPct} previous={margins.prevOverallMarginPct} />
+          </div>
+
+          {margins.trend.every((d) => d.revenue === 0) ? (
+            <p className="report-empty">No costed sales in this range yet — items need a cost price recorded before they contribute to margin (see "Products needing cost price" in Stock).</p>
+          ) : (
+            <MarginTrendChart data={margins.trend} />
+          )}
+
+          <div className="report-controls">
+            <button type="button" className={`secondary sm ${marginGroupBy === "product" ? "active" : ""}`} onClick={() => setMarginGroupBy("product")}>By item</button>
+            <button type="button" className={`secondary sm ${marginGroupBy === "category" ? "active" : ""}`} onClick={() => setMarginGroupBy("category")}>By category</button>
+          </div>
+
+          {sortedMargins.length === 0 ? (
+            <p className="report-empty">No costed sales in this range yet.</p>
+          ) : (
+            <div className="table-panel">
+              <table>
+                <thead>
+                  <tr>
+                    <SortableTh label={marginGroupBy === "category" ? "Category" : "Item"} active={marginSort.key === "label"} dir={marginSort.dir} onClick={() => toggleMarginSort("label")} />
+                    <SortableTh label="Qty sold" active={marginSort.key === "qtySold"} dir={marginSort.dir} onClick={() => toggleMarginSort("qtySold")} />
+                    <SortableTh label="Revenue" active={marginSort.key === "revenue"} dir={marginSort.dir} onClick={() => toggleMarginSort("revenue")} />
+                    <SortableTh label="Cost" active={marginSort.key === "cost"} dir={marginSort.dir} onClick={() => toggleMarginSort("cost")} />
+                    <SortableTh label="Profit" active={marginSort.key === "profit"} dir={marginSort.dir} onClick={() => toggleMarginSort("profit")} />
+                    <SortableTh label="Margin %" active={marginSort.key === "marginPct"} dir={marginSort.dir} onClick={() => toggleMarginSort("marginPct")} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedMargins.map((m) => (
+                    <tr key={m.id}>
+                      <td>{m.label}</td>
+                      <td>{m.qtySold ? m.qtySold.toFixed(2) : "—"}</td>
+                      <td>{currency.format(m.revenue)}</td>
+                      <td>{currency.format(m.cost)}</td>
+                      <td className={m.profit < 0 ? "margin-negative" : ""}>{currency.format(m.profit)}</td>
+                      <td className={m.marginPct < 0 ? "margin-negative" : ""}>{(m.marginPct * 100).toFixed(1)}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </>
       )}
 
@@ -3362,6 +3494,85 @@ function RevenueTrendChart({ data }: { data: { date: string; revenue: number; or
       <div className="trend-chart-labels">
         <span>{new Date(`${data[0].date}T00:00:00`).toLocaleDateString(appSettings.locale, { month: "short", day: "numeric" })}</span>
         <span>{new Date(`${data[n - 1].date}T00:00:00`).toLocaleDateString(appSettings.locale, { month: "short", day: "numeric" })}</span>
+      </div>
+    </div>
+  );
+}
+
+// Same shape as RevenueTrendChart but plots marginPct (0-1) rather than a
+// rand figure — so nemench can see whether margins are drifting over time
+// (e.g. supplier costs rising without sell prices following), not just
+// today's snapshot number.
+function MarginTrendChart({ data }: { data: { date: string; marginPct: number; revenue: number; profit: number }[] }) {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const width = 760, height = 220, padL = 8, padR = 8, padT = 16, padB = 24;
+  const innerW = width - padL - padR, innerH = height - padT - padB;
+  const n = data.length;
+  const maxVal = Math.max(0.05, ...data.map((d) => d.marginPct));
+  const minVal = Math.min(0, ...data.map((d) => d.marginPct));
+  const range = maxVal - minVal || 1;
+  const x = (i: number) => padL + (n <= 1 ? innerW / 2 : (i / (n - 1)) * innerW);
+  const y = (v: number) => padT + innerH - ((v - minVal) / range) * innerH;
+  const linePoints = data.map((d, i) => `${x(i)},${y(d.marginPct)}`).join(" ");
+  const zeroY = y(Math.max(minVal, 0));
+  const areaPoints = `${x(0)},${zeroY} ${linePoints} ${x(n - 1)},${zeroY}`;
+
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const px = ((e.clientX - rect.left) / rect.width) * width;
+    let closest = 0, best = Infinity;
+    for (let i = 0; i < n; i++) {
+      const d = Math.abs(x(i) - px);
+      if (d < best) { best = d; closest = i; }
+    }
+    setHoverIdx(closest);
+  };
+
+  const hovered = hoverIdx != null ? data[hoverIdx] : null;
+
+  return (
+    <div className="trend-chart">
+      <svg viewBox={`0 0 ${width} ${height}`} className="trend-chart-svg"
+        onMouseMove={onMove} onMouseLeave={() => setHoverIdx(null)}>
+        <line x1={padL} y1={zeroY} x2={width - padR} y2={zeroY} className="trend-chart-axis" />
+        <polygon points={areaPoints} className="trend-chart-area" />
+        <polyline points={linePoints} className="trend-chart-line" />
+        {hovered && hoverIdx != null && (
+          <>
+            <line x1={x(hoverIdx)} y1={padT} x2={x(hoverIdx)} y2={padT + innerH} className="trend-chart-crosshair" />
+            <circle cx={x(hoverIdx)} cy={y(hovered.marginPct)} r={4} className="trend-chart-dot" />
+          </>
+        )}
+      </svg>
+      {hovered && hoverIdx != null && (
+        <div className="trend-chart-tooltip" style={{ left: `${(x(hoverIdx) / width) * 100}%` }}>
+          <div className="trend-chart-tooltip-date">{new Date(`${hovered.date}T00:00:00`).toLocaleDateString(appSettings.locale, { month: "short", day: "numeric" })}</div>
+          <div>{(hovered.marginPct * 100).toFixed(1)}% margin</div>
+          <div className="trend-chart-tooltip-sub">{currency.format(hovered.profit)} profit</div>
+        </div>
+      )}
+      <div className="trend-chart-labels">
+        <span>{new Date(`${data[0].date}T00:00:00`).toLocaleDateString(appSettings.locale, { month: "short", day: "numeric" })}</span>
+        <span>{new Date(`${data[n - 1].date}T00:00:00`).toLocaleDateString(appSettings.locale, { month: "short", day: "numeric" })}</span>
+      </div>
+    </div>
+  );
+}
+
+// Headline weighted-average margin for the period, with a percentage-point
+// (not relative-%) change vs. the previous equivalent period — "margin
+// went from 30% to 35%" should read as "+5pp," not the more confusing
+// "+16.7%" a relative-change calculation would produce for the same move.
+function MarginSummaryCard({ current, previous }: { current: number; previous: number }) {
+  const deltaPp = (current - previous) * 100;
+  const dir: "up" | "down" | "flat" = Math.abs(deltaPp) < 0.05 ? "flat" : deltaPp > 0 ? "up" : "down";
+  const Icon = dir === "up" ? ArrowUp : dir === "down" ? ArrowDown : Minus;
+  return (
+    <div className="kpi-card">
+      <div className="kpi-label">Average margin this period</div>
+      <div className="kpi-value">{(current * 100).toFixed(1)}%</div>
+      <div className={`kpi-chip kpi-chip-${dir}`}>
+        <Icon size={13} /> {deltaPp > 0 ? "+" : ""}{deltaPp.toFixed(1)}pp <span className="kpi-chip-sub">vs previous period</span>
       </div>
     </div>
   );

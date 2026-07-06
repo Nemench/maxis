@@ -55,6 +55,11 @@ export interface Product {
   isRawIntake: number;
   createdAt: string;
   updatedAt: string;
+  // Derived from product_cost_history (most recent row), not a column on
+  // this table — null means no cost has ever been recorded, which blocks
+  // the item from being sold via POS (see requireCostPrice) and surfaces
+  // it in the admin "Products needing cost price" list.
+  currentCost: number | null;
 }
 
 export interface ProductInput {
@@ -68,6 +73,11 @@ export interface ProductInput {
   lowStockThreshold: number | null;
   barcode?: string | null;
   isRawIntake?: number;
+  // Submitting a value here appends a new product_cost_history row (see
+  // setProductCost) rather than updating a plain column — omitting it
+  // (undefined) leaves the existing cost history untouched, so editing
+  // unrelated fields on an old product never silently overwrites its cost.
+  costPerUnit?: number | null;
 }
 
 // Minimal fields needed to quick-create a product from an unrecognized
@@ -178,6 +188,11 @@ export interface OrderItemInput {
 export interface OrderItem extends OrderItemInput {
   id: number;
   orderId: number;
+  // Total cost for this line, snapshotted from product_cost_history at the
+  // moment the sale was made (not looked up live) — so a later cost change
+  // never silently rewrites a past sale's margin. Null for free-text lines
+  // (no productId) or sales made before this feature existed.
+  costAtSale: number | null;
 }
 
 export interface DeliveryAddress {
@@ -276,4 +291,30 @@ export interface StatisticsOverview {
   revenueByDept: { department: string; revenue: number }[];
   revenueByOrderType: { orderType: string; revenue: number }[];
   ordersByStatus: { status: string; count: number }[];
+}
+
+// One row of the margins breakdown — grouped by product, category, or day
+// depending on the request (see GET /api/statistics/margins). Weighted by
+// actual rand revenue/profit (total profit / total revenue for the group),
+// not an unweighted average of each sale's margin_pct — a handful of
+// high-margin small sales shouldn't outweigh the bulk of real revenue.
+export interface MarginStat {
+  id: string;
+  label: string;
+  revenue: number;
+  cost: number;
+  profit: number;
+  marginPct: number;
+  qtySold: number;
+}
+
+export interface MarginOverview {
+  current: MarginStat[];
+  // Store-wide weighted average margin for the period, plus the same
+  // figure for the immediately preceding period of equal length (see the
+  // same pattern in StatisticsOverview) so the client can show a %-point
+  // change without a second request.
+  overallMarginPct: number;
+  prevOverallMarginPct: number;
+  trend: { date: string; revenue: number; cost: number; profit: number; marginPct: number }[];
 }
