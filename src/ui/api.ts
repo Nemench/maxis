@@ -101,7 +101,7 @@ export const api = {
   settings: {
     get: () => req<Record<string, string>>("GET", "/settings"),
     set: (data: Record<string, string>) => req<Record<string, string>>("PUT", "/settings", data),
-    public: () => req<{ siteName: string; logoUrl: string; themeColor: string }>("GET", "/settings/public"),
+    public: () => req<{ siteName: string; logoUrl: string; themeColor: string; vatRegistered: boolean; vatNumber: string; businessAddress: string }>("GET", "/settings/public"),
     uploadLogo: (dataUrl: string) => req<{ logoUrl: string }>("POST", "/settings/logo", { dataUrl })
   },
   printers: {

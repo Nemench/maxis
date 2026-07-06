@@ -1889,6 +1889,30 @@ button.sm {
   gap: 8px;
 }
 
+.pos-invoice-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--red);
+  border-radius: 8px;
+}
+
+.pos-invoice-fields .settings-hint {
+  margin: 0;
+  color: var(--red);
+  font-weight: 600;
+}
+
+.pos-invoice-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
 .pos-breakdown-row {
   display: flex;
   justify-content: space-between;

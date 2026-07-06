@@ -199,6 +199,11 @@ export interface CreateOrderInput {
   // over on the spot, so the order is created already Done (History) rather
   // than New (Queue) — there's no prep step left for anyone to action.
   completeImmediately?: boolean;
+  // A flat rand amount off the item subtotal, entered at POS checkout.
+  // Stored on the order itself (not applied to individual line prices) so
+  // it stays a distinct, auditable figure on the tax invoice/receipt and
+  // in reporting, rather than silently baked into item prices.
+  discountAmount?: number;
 }
 
 export interface Order {
@@ -217,6 +222,7 @@ export interface Order {
   requestedByName: string | null;
   createdAt: string;
   updatedAt: string;
+  discountAmount: number;
   items: OrderItem[];
 }
 

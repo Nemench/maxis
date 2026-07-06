@@ -17,10 +17,16 @@ const ALLOWED_LOGO_TYPES: Record<string, string> = {
   png: "png", jpeg: "jpg", jpg: "jpg", webp: "webp"
 };
 
-// Public — no auth — so the login screen can brand itself before sign-in
+// Public — no auth — so the login screen can brand itself before sign-in.
+// vatNumber/businessAddress/vatRegistered are included too (not sensitive —
+// they're printed on every receipt anyway) so buildReceiptHtml can read them
+// from the same cache without a separate authenticated round trip.
 router.get("/public", (_req, res) => {
   const s = db.getAllSettings();
-  res.json({ siteName: s.siteName || "MAXIS", logoUrl: s.logoUrl || "", themeColor: s.themeColor || "" });
+  res.json({
+    siteName: s.siteName || "MAXIS", logoUrl: s.logoUrl || "", themeColor: s.themeColor || "",
+    vatRegistered: s.vatRegistered === "true", vatNumber: s.vatNumber || "", businessAddress: s.businessAddress || ""
+  });
 });
 
 router.get("/", requireAuth, (_req, res) => {

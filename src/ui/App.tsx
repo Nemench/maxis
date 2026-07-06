@@ -85,7 +85,7 @@ function applyBranding(siteName: string, logoUrl: string) {
 
 // Plain module cache so receipt-building functions (outside the React tree) can
 // read live branding without threading it through every print call site.
-let receiptBranding = { siteName: "MAXIS", logoUrl: "", themeColor: "" };
+let receiptBranding = { siteName: "MAXIS", logoUrl: "", themeColor: "", vatRegistered: false, vatNumber: "", businessAddress: "" };
 function setReceiptBranding(patch: Partial<typeof receiptBranding>) {
   receiptBranding = { ...receiptBranding, ...patch };
 }
@@ -141,7 +141,7 @@ export function App() {
     api.settings.public().then((s) => {
       setBranding({ siteName: s.siteName, logoUrl: s.logoUrl });
       applyBranding(s.siteName, s.logoUrl);
-      setReceiptBranding({ siteName: s.siteName, logoUrl: s.logoUrl, themeColor: s.themeColor });
+      setReceiptBranding({ siteName: s.siteName, logoUrl: s.logoUrl, themeColor: s.themeColor, vatRegistered: s.vatRegistered, vatNumber: s.vatNumber, businessAddress: s.businessAddress });
       if (s.themeColor) applyTheme(s.themeColor);
     }).catch(() => undefined);
   }, []);
@@ -615,6 +615,10 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
   const [discount, setDiscount] = useState(() => loadSavedSale().discount);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  // Only actually required above the R5,000 full-tax-invoice threshold
+  // (see needsFullInvoice below) — otherwise unused and left blank.
+  const [buyerName, setBuyerName] = useState("");
+  const [buyerAddress, setBuyerAddress] = useState("");
   // Index of the line awaiting PIN confirmation before it's actually
   // removed — a fat-finger tap on the trash icon during a live sale
   // shouldn't be enough on its own to drop an item.
@@ -693,7 +697,7 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
 
   const removeLine = (index: number) => setCart((cur) => cur.filter((_, i) => i !== index));
 
-  const clearSale = () => { setCart([]); setDiscount(0); setError(""); };
+  const clearSale = () => { setCart([]); setDiscount(0); setBuyerName(""); setBuyerAddress(""); setError(""); };
 
   // South African retail prices are required to be displayed VAT-inclusive
   // (Consumer Protection Act / VAT Act) — pricePerUnit is already the
@@ -706,23 +710,32 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
   const clampedDiscount = Math.min(Math.max(0, discount), subtotal);
   const total = subtotal - clampedDiscount;
   const vat = total * (VAT_RATE / (1 + VAT_RATE));
-  const canCheckout = cart.length > 0 && !submitting;
+
+  // SARS requires a full tax invoice (buyer name + address, not just a
+  // till slip) for any single sale over R5,000 — see the SARS Tax Invoice
+  // Guide. Below that, an abridged till slip is fine and no buyer details
+  // are needed.
+  const FULL_INVOICE_THRESHOLD = 5000;
+  const needsFullInvoice = total > FULL_INVOICE_THRESHOLD;
+  const canCheckout = cart.length > 0 && !submitting && (!needsFullInvoice || (buyerName.trim() && buyerAddress.trim()));
 
   const checkout = async () => {
     if (!canCheckout) return;
     setSubmitting(true); setError("");
     const payload: CreateOrderInput = {
-      // Deliberately empty — a POS sale has no customer on file, and an
-      // empty customerName tells buildReceiptHtml to skip the whole
-      // "Customer Details" block rather than print a placeholder name.
-      customerName: "",
+      // Deliberately empty for an ordinary sale — an empty customerName
+      // tells buildReceiptHtml to skip the whole "Customer Details" block
+      // rather than print a placeholder name. Only populated above the
+      // R5,000 full-tax-invoice threshold, where SARS requires it.
+      customerName: needsFullInvoice ? buyerName.trim() : "",
       customerPhone: "",
       orderType: "pickup",
-      deliveryAddress: { street: "", area: "", buildingType: "", apartment: "" },
+      deliveryAddress: needsFullInvoice ? { street: buyerAddress.trim(), area: "", buildingType: "", apartment: "" } : { street: "", area: "", buildingType: "", apartment: "" },
       requestedTime: "",
       assignedTo: "",
       items: cart,
-      completeImmediately: true
+      completeImmediately: true,
+      discountAmount: clampedDiscount
     };
     try {
       const order = await api.orders.create(payload);
@@ -806,15 +819,24 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
               onChange={(e) => setDiscount(e.target.value ? Number(e.target.value) : 0)}
             />
           </div>
-          <div className="pos-breakdown-row">
-            <span>VAT incl. (15%)</span>
-            <span>{currency.format(vat)}</span>
-          </div>
+          {receiptBranding.vatRegistered && (
+            <div className="pos-breakdown-row">
+              <span>VAT incl. (15%)</span>
+              <span>{currency.format(vat)}</span>
+            </div>
+          )}
           <div className="pos-breakdown-row pos-breakdown-total">
             <span>Total</span>
             <span>{currency.format(total)}</span>
           </div>
         </div>
+        {needsFullInvoice && (
+          <div className="pos-invoice-fields">
+            <p className="settings-hint">Sales over {currency.format(FULL_INVOICE_THRESHOLD)} legally require a full tax invoice — enter the buyer's details to continue.</p>
+            <label>Buyer name<input value={buyerName} onChange={(e) => setBuyerName(e.target.value)} placeholder="Required for sales over R5,000" /></label>
+            <label>Buyer address<input value={buyerAddress} onChange={(e) => setBuyerAddress(e.target.value)} placeholder="Required for sales over R5,000" /></label>
+          </div>
+        )}
         {error && <p className="form-error">{error}</p>}
         <div className="pos-receipt-actions">
           <button type="button" className="pos-clear-btn" disabled={cart.length === 0 || submitting} onClick={() => setPendingClearSale(true)}>Clear Sale</button>
@@ -2305,6 +2327,9 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [stockLocations, setStockLocations] = useState<StockLocation[]>([]);
   const [salesStockLocationId, setSalesStockLocationId] = useState("");
+  const [vatRegistered, setVatRegistered] = useState(false);
+  const [vatNumber, setVatNumber] = useState("");
+  const [businessAddress, setBusinessAddress] = useState("");
   const csvInputRef = useRef<HTMLInputElement>(null);
   const restoreInputRef = useRef<HTMLInputElement>(null);
   const logoInputRef = useRef<HTMLInputElement>(null);
@@ -2323,6 +2348,9 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
       setHistoryDays(Number(s.historyDays ?? 30));
       setThemeColor(s.themeColor || "#1a47a0");
       setSalesStockLocationId(s.salesStockLocationId ?? "");
+      setVatRegistered(s.vatRegistered === "true");
+      setVatNumber(s.vatNumber ?? "");
+      setBusinessAddress(s.businessAddress ?? "");
     }).catch(() => undefined);
     api.stock.locations.list().then(setStockLocations).catch(() => undefined);
   }, []);
@@ -2339,6 +2367,26 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
     setSalesStockLocationId(locationId);
     setMsg("Sales stock location saved");
     window.setTimeout(() => setMsg(""), 2500);
+  };
+
+  const saveVatRegistered = async (registered: boolean) => {
+    setVatRegistered(registered);
+    setReceiptBranding({ vatRegistered: registered });
+    await api.settings.set({ vatRegistered: String(registered) });
+    setMsg("VAT registration status saved");
+    window.setTimeout(() => setMsg(""), 2500);
+  };
+
+  const saveVatNumber = async (value: string) => {
+    setVatNumber(value);
+    setReceiptBranding({ vatNumber: value });
+    await api.settings.set({ vatNumber: value });
+  };
+
+  const saveBusinessAddress = async (value: string) => {
+    setBusinessAddress(value);
+    setReceiptBranding({ businessAddress: value });
+    await api.settings.set({ businessAddress: value });
   };
 
   const saveSiteName = async (name: string) => {
@@ -2625,6 +2673,36 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
             />
             <span>days</span>
           </div>
+        </div>
+      </section>
+
+      <section className="settings-section">
+        <h3>Tax &amp; Legal</h3>
+        <div className="setting-row">
+          <div className="setting-info">
+            <strong>VAT registered</strong>
+            <p>Only enable this once actually registered with SARS — receipts print a VAT breakdown and VAT number only when this is on. Charging/claiming VAT without being registered is illegal.</p>
+          </div>
+          <label className="checkbox-label">
+            <input type="checkbox" checked={vatRegistered} onChange={(e) => void saveVatRegistered(e.target.checked)} />
+            Registered
+          </label>
+        </div>
+        {vatRegistered && (
+          <div className="setting-row">
+            <div className="setting-info">
+              <strong>VAT number</strong>
+              <p>Printed on every receipt as required for a valid tax invoice.</p>
+            </div>
+            <input value={vatNumber} onChange={(e) => setVatNumber(e.target.value)} onBlur={(e) => void saveVatNumber(e.target.value.trim())} placeholder="e.g. 4123456789" />
+          </div>
+        )}
+        <div className="setting-row">
+          <div className="setting-info">
+            <strong>Business address</strong>
+            <p>Physical business address, printed on receipts — required on a valid tax invoice.</p>
+          </div>
+          <textarea value={businessAddress} onChange={(e) => setBusinessAddress(e.target.value)} onBlur={(e) => void saveBusinessAddress(e.target.value.trim())} placeholder={"e.g. 12 Main Road\nSandton, 2196"} rows={2} />
         </div>
       </section>
 
@@ -3149,7 +3227,6 @@ function RevenueTrendChart({ data }: { data: { date: string; revenue: number; or
 // (80mm, for receipt printers) or A4 (full-page) layout.
 function buildReceiptHtml(order: Order, type: "kitchen" | "counter" | "master", style: "thermal" | "a4"): string {
   const items = type === "master" ? order.items : order.items.filter((i) => i.department === type);
-  const label = type === "kitchen" ? "KITCHEN ORDER" : type === "counter" ? "COUNTER ORDER" : "RECEIPT";
   const d = new Date(order.createdAt);
   const dateStr = d.toLocaleDateString(appSettings.locale);
   const timeStr = d.toLocaleTimeString(appSettings.locale, { hour: "2-digit", minute: "2-digit" });
@@ -3157,7 +3234,29 @@ function buildReceiptHtml(order: Order, type: "kitchen" | "counter" | "master", 
   const siteName = esc(receiptBranding.siteName || "MAXIS");
   const { blue, blueDark } = deriveShades(/^#[0-9a-f]{6}$/i.test(receiptBranding.themeColor) ? receiptBranding.themeColor : "#1a47a0");
 
-  const addrLines = order.orderType === "delivery" && order.deliveryAddress?.street
+  // Only the customer-facing "master" receipt is a financial document —
+  // kitchen/counter slips are prep instructions, so they keep the
+  // plain KITCHEN/COUNTER ORDER label and never show prices/VAT/totals.
+  const isReceipt = type === "master";
+  const subtotal = items.reduce((sum, i) => sum + (i.lineTotal ?? 0), 0);
+  const discountAmount = isReceipt ? Math.min(Math.max(0, order.discountAmount || 0), subtotal) : 0;
+  const totalDue = subtotal - discountAmount;
+  // SARS: prices are VAT-inclusive by law, so VAT here is the tax
+  // component already inside the total, not an amount added on top —
+  // and it's only shown at all if the business is actually VAT-registered.
+  const vatAmount = isReceipt && receiptBranding.vatRegistered ? totalDue * (0.15 / 1.15) : 0;
+  // Abridged tax invoice (till slip) is fine up to R5000; a full tax
+  // invoice (this one, since the >R5000 POS flow captures buyer details)
+  // is required above that — see SARS Tax Invoice Guide.
+  const isFullTaxInvoice = isReceipt && receiptBranding.vatRegistered && totalDue > 5000;
+  const label = type === "kitchen" ? "KITCHEN ORDER" : type === "counter" ? "COUNTER ORDER"
+    : receiptBranding.vatRegistered ? "TAX INVOICE" : "RECEIPT";
+
+  // Shown whenever an address was actually captured — not gated to
+  // orderType === "delivery", since a >R5000 POS sale also stores the
+  // buyer's address (SARS full tax invoice requirement) on an otherwise
+  // ordinary "pickup" order.
+  const addrLines = order.deliveryAddress?.street
     ? [order.deliveryAddress.street, order.deliveryAddress.area, order.deliveryAddress.buildingType === "building" && order.deliveryAddress.apartment ? `Apt ${order.deliveryAddress.apartment}` : ""].filter(Boolean)
     : [];
   const requestedAtLine = order.requestedTime ? `${order.orderType === "delivery" ? "Deliver at" : "Pickup at"}: ${formatRequestedTime(order.requestedTime)}` : "";
@@ -3167,6 +3266,7 @@ function buildReceiptHtml(order: Order, type: "kitchen" | "counter" | "master", 
       <td><b>${esc(i.name)}</b>${i.notes ? `<div class="note">${esc(i.notes)}</div>` : ""}</td>
       <td>${i.kg ? `${i.kg} kg` : i.wantedPrice ? `${currency.format(i.wantedPrice)} (to weigh)` : "—"}</td>
       <td>${i.quantity ? `×${i.quantity}` : "—"}</td>
+      ${isReceipt ? `<td>${i.lineTotal != null ? currency.format(i.lineTotal) : "—"}</td>` : ""}
     </tr>`).join("");
 
     return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(label)} — ${esc(order.ticketNumber)}</title><style>
@@ -3174,6 +3274,7 @@ function buildReceiptHtml(order: Order, type: "kitchen" | "counter" | "master", 
 body{font-family:Inter,'Segoe UI',Arial,sans-serif;font-size:13px;color:#1a1a2e;line-height:1.5;padding:18mm}
 .hdr{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:14px;border-bottom:3px solid ${blueDark};margin-bottom:20px}
 .hdr-left .shop{font-size:20px;font-weight:800;color:${blue}}.hdr-left .type{font-size:15px;font-weight:700;color:${blueDark};margin-top:4px}
+.hdr-left .legal{font-size:11px;color:#666;margin-top:6px;line-height:1.4}
 .hdr-right{text-align:right}.logo{width:72px;height:72px;border-radius:50%;object-fit:cover;border:2px solid ${blueDark}}
 .tnum{font-size:14px;font-weight:700;color:${blueDark};margin-top:6px}.dt{font-size:12px;color:#666;margin-top:2px}
 .cbox{border:1px solid #c8d5ee;border-radius:8px;padding:14px 18px;margin-bottom:20px;background:#f4f7fd}
@@ -3185,10 +3286,20 @@ th{color:#fff;padding:8px 12px;text-align:left;font-size:11px;font-weight:600;te
 td{padding:9px 12px;border-bottom:1px solid #e8eef7;font-size:13px;vertical-align:top}
 tr:nth-child(even) td{background:#f8f9fc}tr:last-child td{border-bottom:none}
 .note{font-size:11px;color:#666;margin-top:2px}
+.totals{margin-left:auto;width:280px;margin-top:4px}
+.totals-row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;color:#444}
+.totals-row.grand{font-size:17px;font-weight:800;color:#1a1a2e;border-top:2px solid ${blueDark};padding-top:8px;margin-top:4px}
 .footer{margin-top:40px;text-align:center;color:#888;font-size:12px;border-top:1px solid #e0e6f0;padding-top:12px}
 </style></head><body>
 <div class="hdr">
-  <div class="hdr-left"><div class="shop">${siteName}</div><div class="type">${esc(label)}</div></div>
+  <div class="hdr-left">
+    <div class="shop">${siteName}</div>
+    <div class="type">${esc(label)}${isFullTaxInvoice ? " (Full)" : ""}</div>
+    ${isReceipt && (receiptBranding.businessAddress || (receiptBranding.vatRegistered && receiptBranding.vatNumber)) ? `<div class="legal">
+      ${receiptBranding.businessAddress ? esc(receiptBranding.businessAddress).replace(/\n/g, "<br>") + "<br>" : ""}
+      ${receiptBranding.vatRegistered && receiptBranding.vatNumber ? `VAT Reg. No: ${esc(receiptBranding.vatNumber)}` : ""}
+    </div>` : ""}
+  </div>
   <div class="hdr-right"><img class="logo" src="${logoUrl}" alt="${siteName}"><div class="tnum">${esc(order.ticketNumber)}</div><div class="dt">${dateStr} &nbsp; ${timeStr}</div></div>
 </div>
 ${order.customerName ? `<div class="cbox">
@@ -3201,8 +3312,14 @@ ${order.customerName ? `<div class="cbox">
   ${order.requestedByName ? `<div class="cline">Served by: ${esc(order.requestedByName)}</div>` : ""}
   ${order.assignedTo ? `<div class="cline">Assigned to: <b>${esc(order.assignedTo)}</b></div>` : ""}
 </div>` : ""}
-<table><thead><tr><th>Item</th><th>Kg</th><th>Qty</th></tr></thead>
+<table><thead><tr><th>Item</th><th>Kg</th><th>Qty</th>${isReceipt ? "<th>Price</th>" : ""}</tr></thead>
 <tbody>${rows}</tbody></table>
+${isReceipt ? `<div class="totals">
+  <div class="totals-row"><span>Subtotal</span><span>${currency.format(subtotal)}</span></div>
+  ${discountAmount > 0 ? `<div class="totals-row"><span>Discount</span><span>-${currency.format(discountAmount)}</span></div>` : ""}
+  ${receiptBranding.vatRegistered ? `<div class="totals-row"><span>VAT incl. (15%)</span><span>${currency.format(vatAmount)}</span></div>` : ""}
+  <div class="totals-row grand"><span>Total</span><span>${currency.format(totalDue)}</span></div>
+</div>` : ""}
 <div class="footer">Thank you for your order — ${siteName}</div>
 </body></html>`;
   }
@@ -3210,7 +3327,8 @@ ${order.customerName ? `<div class="cbox">
   // Thermal (80mm)
   const rows = items.map((i) => {
     const qty = [i.kg ? `${i.kg} kg` : i.wantedPrice ? `${currency.format(i.wantedPrice)} (to weigh)` : "", i.quantity ? `×${i.quantity}` : ""].filter(Boolean).join("  ");
-    return `<div class="item"><div class="iname">${esc(i.name)}</div><div class="isub">${esc(qty)}${i.notes ? `  — ${esc(i.notes)}` : ""}</div></div>`;
+    const priceLine = isReceipt && i.lineTotal != null ? `<div class="iprice">${currency.format(i.lineTotal)}</div>` : "";
+    return `<div class="item"><div class="iname">${esc(i.name)}</div><div class="isub">${esc(qty)}${i.notes ? `  — ${esc(i.notes)}` : ""}</div>${priceLine}</div>`;
   }).join("");
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(label)} — ${esc(order.ticketNumber)}</title><style>
@@ -3220,18 +3338,26 @@ body{font-family:'Courier New',Courier,monospace;font-size:12px;width:72mm;paddi
 .logo{width:52px;height:52px;border-radius:50%;object-fit:cover;margin-bottom:4px}
 .shop{font-size:13px;font-weight:bold;color:${blue};letter-spacing:.5px}
 .lbl{font-size:15px;font-weight:bold;letter-spacing:1px;color:${blueDark};margin-top:2px}
+.legal{font-size:10px;color:#444;margin-top:2px;line-height:1.4}
 .tnum{font-size:12px;font-weight:bold;color:#333}.dt{font-size:11px;color:#555}
 .cust{margin:4px 0}.cname{font-size:13px;font-weight:bold}
 .cphone{font-size:12px;color:#333}.del{font-weight:bold;color:${blue}}
 .addr{font-size:11px;color:#333;margin-top:2px}.ttag{font-size:11px;font-weight:bold;color:${blueDark};margin-top:2px}
 .by{font-size:10px;color:#666;margin-top:2px}
 .item{margin:5px 0}.iname{font-weight:bold}.isub{color:#444;font-size:11px;margin-top:1px}
+.iprice{text-align:right;font-weight:bold;font-size:12px;margin-top:1px}
+.totals-row{display:flex;justify-content:space-between;font-size:12px;margin:2px 0}
+.totals-row.grand{font-size:15px;font-weight:bold;border-top:1px solid #000;padding-top:4px;margin-top:4px}
 .footer{font-size:11px;color:#555}
 </style></head><body>
 <div class="center">
   <img class="logo" src="${logoUrl}" alt="${siteName}">
   <div class="shop">${siteName}</div>
-  <div class="lbl">${esc(label)}</div>
+  <div class="lbl">${esc(label)}${isFullTaxInvoice ? " (Full)" : ""}</div>
+  ${isReceipt && (receiptBranding.businessAddress || (receiptBranding.vatRegistered && receiptBranding.vatNumber)) ? `<div class="legal">
+    ${receiptBranding.businessAddress ? esc(receiptBranding.businessAddress).replace(/\n/g, "<br>") + "<br>" : ""}
+    ${receiptBranding.vatRegistered && receiptBranding.vatNumber ? `VAT Reg: ${esc(receiptBranding.vatNumber)}` : ""}
+  </div>` : ""}
   <div class="tnum">${esc(order.ticketNumber)}</div>
   <div class="dt">${dateStr} &nbsp; ${timeStr}</div>
 </div>
@@ -3248,6 +3374,12 @@ ${order.customerName ? `<div class="cust">
 <hr class="sep">` : ""}
 ${rows}
 <hr class="sep">
+${isReceipt ? `
+<div class="totals-row"><span>Subtotal</span><span>${currency.format(subtotal)}</span></div>
+${discountAmount > 0 ? `<div class="totals-row"><span>Discount</span><span>-${currency.format(discountAmount)}</span></div>` : ""}
+${receiptBranding.vatRegistered ? `<div class="totals-row"><span>VAT incl. (15%)</span><span>${currency.format(vatAmount)}</span></div>` : ""}
+<div class="totals-row grand"><span>Total</span><span>${currency.format(totalDue)}</span></div>
+<hr class="sep">` : ""}
 <div class="center footer">Thank you for your order</div>
 </body></html>`;
 }

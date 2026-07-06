@@ -576,9 +576,22 @@ export class KotDatabase {
     const counterStatus: DeptStatus = hasCounter ? (doneNow ? "Done" : "New") : "n/a";
     const overallStatus: OrderStatus = doneNow ? "Done" : "New";
 
+    const discountAmount = Math.max(0, input.discountAmount ?? 0);
+
+    // SARS requires a full tax invoice (buyer name + address) for any
+    // single sale over R5,000 — enforced here too, not just the POS
+    // screen's button-disable, since the client is never the actual
+    // boundary for a legal requirement like this one.
+    if (doneNow) {
+      const saleTotal = input.items.reduce((sum, i) => sum + (i.lineTotal ?? 0), 0) - discountAmount;
+      if (saleTotal > 5000 && (!input.customerName.trim() || !input.deliveryAddress?.street?.trim())) {
+        throw new Error("Sales over R5,000 require the buyer's name and address (SARS full tax invoice rule)");
+      }
+    }
+
     const result = this.db
-      .prepare("INSERT INTO orders (ticketNumber, customerName, customerPhone, orderType, deliveryAddress, requestedTime, assignedTo, status, kitchenStatus, counterStatus, requestedById, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(ticketNumber, input.customerName.trim(), input.customerPhone.trim(), input.orderType, input.orderType === "delivery" ? JSON.stringify(input.deliveryAddress) : "{}", input.requestedTime.trim(), input.assignedTo?.trim() || null, overallStatus, kitchenStatus, counterStatus, requestedById, now, now);
+      .prepare("INSERT INTO orders (ticketNumber, customerName, customerPhone, orderType, deliveryAddress, requestedTime, assignedTo, status, kitchenStatus, counterStatus, requestedById, createdAt, updatedAt, discountAmount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(ticketNumber, input.customerName.trim(), input.customerPhone.trim(), input.orderType, input.orderType === "delivery" || input.deliveryAddress?.street ? JSON.stringify(input.deliveryAddress) : "{}", input.requestedTime.trim(), input.assignedTo?.trim() || null, overallStatus, kitchenStatus, counterStatus, requestedById, now, now, discountAmount);
 
     const orderId = Number(result.lastInsertRowid);
     const insertItem = this.db.prepare(
@@ -634,7 +647,7 @@ export class KotDatabase {
     const base = `
       SELECT o.id, o.ticketNumber, o.customerName, o.customerPhone, o.orderType,
              o.deliveryAddress, o.requestedTime, o.assignedTo, o.status, o.kitchenStatus, o.counterStatus,
-             o.requestedById, o.createdAt, o.updatedAt, u.name as requestedByName,
+             o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, u.name as requestedByName,
              oi.id as oi_id, oi.productId as oi_productId, oi.name as oi_name,
              oi.kg as oi_kg, oi.quantity as oi_quantity, oi.notes as oi_notes,
              oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept
@@ -670,7 +683,7 @@ export class KotDatabase {
     const sql = `
       SELECT o.id, o.ticketNumber, o.customerName, o.customerPhone, o.orderType,
              o.deliveryAddress, o.requestedTime, o.assignedTo, o.status, o.kitchenStatus, o.counterStatus,
-             o.requestedById, o.createdAt, o.updatedAt, u.name as requestedByName,
+             o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, u.name as requestedByName,
              oi.id as oi_id, oi.productId as oi_productId, oi.name as oi_name,
              oi.kg as oi_kg, oi.quantity as oi_quantity, oi.notes as oi_notes,
              oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept
@@ -689,6 +702,11 @@ export class KotDatabase {
   // free-text order lines (no catalog product picked) never have one —
   // this way every item that's ever actually been sold shows up, not just
   // ones still in the catalog.
+  // Gross per-item revenue (i.e. before any order-level discount — see
+  // Order.discountAmount) since a whole-order discount can't be allocated
+  // back to individual lines in any non-arbitrary way. The headline figure
+  // in statisticsOverview is net of discounts; this per-item breakdown is
+  // gross sales by item, a legitimate metric in its own right.
   salesByItem(from: string, to: string): ItemSalesStat[] {
     return this.db
       .prepare(`
@@ -729,16 +747,27 @@ export class KotDatabase {
   // the immediately-preceding period of equal length (for %-change) so the
   // client doesn't need a second request just to compute deltas.
   statisticsOverview(from: string, to: string): StatisticsOverview {
-    const totals = (f: string, t: string) => this.db
-      .prepare(`
-        SELECT COALESCE(SUM(oi.lineTotal), 0) as totalRevenue,
-               COALESCE(SUM(oi.kg), 0) as totalKg,
-               COALESCE(SUM(oi.quantity), 0) as totalQty,
-               COUNT(DISTINCT oi.orderId) as totalOrders
-        FROM order_items oi
-        JOIN orders o ON o.id = oi.orderId
-        WHERE substr(o.createdAt, 1, 10) >= ? AND substr(o.createdAt, 1, 10) <= ?`)
-      .get(f, t) as { totalRevenue: number; totalKg: number; totalQty: number; totalOrders: number };
+    // Discounts are stored once per order (see Order.discountAmount), not
+    // per item, so they're summed from a distinct orders-only query and
+    // subtracted from the item-joined gross total — summing them off the
+    // order_items join directly would multiply a single order's discount
+    // by however many line items it has.
+    const totals = (f: string, t: string) => {
+      const gross = this.db
+        .prepare(`
+          SELECT COALESCE(SUM(oi.lineTotal), 0) as grossRevenue,
+                 COALESCE(SUM(oi.kg), 0) as totalKg,
+                 COALESCE(SUM(oi.quantity), 0) as totalQty,
+                 COUNT(DISTINCT oi.orderId) as totalOrders
+          FROM order_items oi
+          JOIN orders o ON o.id = oi.orderId
+          WHERE substr(o.createdAt, 1, 10) >= ? AND substr(o.createdAt, 1, 10) <= ?`)
+        .get(f, t) as { grossRevenue: number; totalKg: number; totalQty: number; totalOrders: number };
+      const { totalDiscount } = this.db
+        .prepare(`SELECT COALESCE(SUM(discountAmount), 0) as totalDiscount FROM orders WHERE substr(createdAt, 1, 10) >= ? AND substr(createdAt, 1, 10) <= ?`)
+        .get(f, t) as { totalDiscount: number };
+      return { totalRevenue: gross.grossRevenue - totalDiscount, totalKg: gross.totalKg, totalQty: gross.totalQty, totalOrders: gross.totalOrders };
+    };
 
     const days = Math.round((new Date(`${to}T00:00:00Z`).getTime() - new Date(`${from}T00:00:00Z`).getTime()) / 86400000) + 1;
     const shift = (d: string, n: number) => new Date(new Date(`${d}T00:00:00Z`).getTime() + n * 86400000).toISOString().slice(0, 10);
@@ -748,7 +777,15 @@ export class KotDatabase {
     const current = totals(from, to);
     const previous = totals(prevFrom, prevTo);
 
-    const revenueByDay = this.db
+    // Per-day discount, keyed the same way, subtracted from that day's
+    // gross the same way as the headline totals above.
+    const discountByDay = new Map(
+      (this.db
+        .prepare(`SELECT substr(createdAt, 1, 10) as date, SUM(discountAmount) as discount FROM orders WHERE substr(createdAt, 1, 10) >= ? AND substr(createdAt, 1, 10) <= ? GROUP BY date`)
+        .all(from, to) as { date: string; discount: number }[])
+        .map((r) => [r.date, r.discount])
+    );
+    const revenueByDay = (this.db
       .prepare(`
         SELECT substr(o.createdAt, 1, 10) as date,
                COALESCE(SUM(oi.lineTotal), 0) as revenue,
@@ -757,8 +794,13 @@ export class KotDatabase {
         LEFT JOIN order_items oi ON oi.orderId = o.id
         WHERE substr(o.createdAt, 1, 10) >= ? AND substr(o.createdAt, 1, 10) <= ?
         GROUP BY date ORDER BY date ASC`)
-      .all(from, to) as { date: string; revenue: number; orders: number }[];
+      .all(from, to) as { date: string; revenue: number; orders: number }[])
+      .map((r) => ({ ...r, revenue: r.revenue - (discountByDay.get(r.date) ?? 0) }));
 
+    // Gross, like salesByItem — a whole-order discount can't be split
+    // between departments/order-types any less arbitrarily than between
+    // items, so these breakdowns intentionally don't net it out. Only the
+    // headline totalRevenue/revenueByDay above do.
     const revenueByDept = this.db
       .prepare(`
         SELECT oi.department as department, COALESCE(SUM(oi.lineTotal), 0) as revenue
@@ -948,6 +990,7 @@ export class KotDatabase {
       if (!cols.includes("deliveryAddress")) this.db.exec("ALTER TABLE orders ADD COLUMN deliveryAddress TEXT NOT NULL DEFAULT '{}'");
       if (!cols.includes("requestedTime")) this.db.exec("ALTER TABLE orders ADD COLUMN requestedTime TEXT NOT NULL DEFAULT ''");
       if (!cols.includes("assignedTo")) this.db.exec("ALTER TABLE orders ADD COLUMN assignedTo TEXT");
+      if (!cols.includes("discountAmount")) this.db.exec("ALTER TABLE orders ADD COLUMN discountAmount REAL NOT NULL DEFAULT 0");
     }
 
     // Add stock-tracking columns to products if missing (existing databases)
@@ -1042,7 +1085,8 @@ export class KotDatabase {
         counterStatus TEXT NOT NULL DEFAULT 'n/a',
         requestedById INTEGER REFERENCES users(id),
         createdAt TEXT NOT NULL,
-        updatedAt TEXT NOT NULL
+        updatedAt TEXT NOT NULL,
+        discountAmount REAL NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS order_items (
@@ -1149,6 +1193,14 @@ export class KotDatabase {
     this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('siteName', 'MAXIS')").run();
     this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('logoUrl', '')").run();
     this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('themeColor', '')").run();
+    // Defaults to "not registered" on every fresh install, deliberately —
+    // this app has no way to know a new deployment's actual VAT status, and
+    // presuming "registered" would risk a shop that isn't VAT-registered
+    // printing a VAT breakdown/number it has no right to. Flip it on
+    // (Settings > Tax & Legal) once the real number is known.
+    this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('vatRegistered', 'false')").run();
+    this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('vatNumber', '')").run();
+    this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('businessAddress', '')").run();
   }
 
   // ── Settings ───────────────────────────────────────────────────────────────
