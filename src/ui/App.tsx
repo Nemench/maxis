@@ -910,11 +910,25 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
 // than a bare number field sitting in the breakdown — same reasoning as
 // Clear Sale needing to be a real button, not just easy to miss.
 function DiscountModal({ initialValue, max, onApply, onClose }: { initialValue: number; max: number; onApply: (value: number) => void; onClose: () => void }) {
+  const [mode, setMode] = useState<"rand" | "percent">("rand");
   const [value, setValue] = useState(initialValue ? String(initialValue) : "");
+
+  // Always resolves to (and persists as) a flat rand amount — % is just a
+  // convenient way to enter one, computed off the current subtotal at the
+  // moment it's applied. Switching mode re-derives the other unit from the
+  // current input so a half-typed value isn't silently lost.
+  const switchMode = (next: "rand" | "percent") => {
+    const n = Number(value) || 0;
+    if (mode === "rand" && next === "percent") setValue(max > 0 ? String(Number(((n / max) * 100).toFixed(2))) : "");
+    if (mode === "percent" && next === "rand") setValue(String(Number(((n / 100) * max).toFixed(2))));
+    setMode(next);
+  };
+
+  const resolvedRand = mode === "percent" ? (Math.min(Math.max(0, Number(value) || 0), 100) / 100) * max : Number(value) || 0;
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    onApply(Math.min(Math.max(0, Number(value) || 0), max));
+    onApply(Math.min(Math.max(0, resolvedRand), max));
   };
 
   return (
@@ -925,9 +939,17 @@ function DiscountModal({ initialValue, max, onApply, onClose }: { initialValue: 
           <button type="button" className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
         </div>
         <form className="modal-body" onSubmit={submit}>
-          <label>Discount amount (R)
-            <input type="number" min="0" step="0.01" max={max} autoFocus value={value} onChange={(e) => setValue(e.target.value)} placeholder="0.00" />
+          <div className="order-type-toggle">
+            <button type="button" className={mode === "rand" ? "active" : "secondary"} onClick={() => switchMode("rand")}>Rand (R)</button>
+            <button type="button" className={mode === "percent" ? "active" : "secondary"} onClick={() => switchMode("percent")}>Percent (%)</button>
+          </div>
+          <label>{mode === "rand" ? "Discount amount (R)" : "Discount (%)"}
+            <input
+              type="number" min="0" step="0.01" max={mode === "rand" ? max : 100} autoFocus
+              value={value} onChange={(e) => setValue(e.target.value)} placeholder={mode === "rand" ? "0.00" : "0"}
+            />
           </label>
+          {mode === "percent" && <p className="settings-hint">= {currency.format(resolvedRand)}</p>}
           <footer className="actions">
             {initialValue > 0 && <button type="button" className="danger" onClick={() => onApply(0)}>Remove discount</button>}
             <button type="submit">Apply</button>
