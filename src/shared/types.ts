@@ -204,6 +204,12 @@ export interface CreateOrderInput {
   // it stays a distinct, auditable figure on the tax invoice/receipt and
   // in reporting, rather than silently baked into item prices.
   discountAmount?: number;
+  // How the POS sale was paid — a plain record for reporting/reconciliation,
+  // not an actual payment integration (this app never touches card data).
+  paymentMethod?: "cash" | "card";
+  // What the customer physically handed over, for cash sales only — the
+  // change due is derived from this minus the total, not stored separately.
+  cashTendered?: number | null;
 }
 
 export interface Order {
@@ -223,6 +229,8 @@ export interface Order {
   createdAt: string;
   updatedAt: string;
   discountAmount: number;
+  paymentMethod: "cash" | "card";
+  cashTendered: number | null;
   items: OrderItem[];
 }
 

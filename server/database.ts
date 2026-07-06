@@ -577,21 +577,26 @@ export class KotDatabase {
     const overallStatus: OrderStatus = doneNow ? "Done" : "New";
 
     const discountAmount = Math.max(0, input.discountAmount ?? 0);
+    const paymentMethod = input.paymentMethod === "card" ? "card" : "cash";
+    const saleTotal = input.items.reduce((sum, i) => sum + (i.lineTotal ?? 0), 0) - discountAmount;
 
     // SARS requires a full tax invoice (buyer name + address) for any
     // single sale over R5,000 — enforced here too, not just the POS
     // screen's button-disable, since the client is never the actual
     // boundary for a legal requirement like this one.
     if (doneNow) {
-      const saleTotal = input.items.reduce((sum, i) => sum + (i.lineTotal ?? 0), 0) - discountAmount;
       if (saleTotal > 5000 && (!input.customerName.trim() || !input.deliveryAddress?.street?.trim())) {
         throw new Error("Sales over R5,000 require the buyer's name and address (SARS full tax invoice rule)");
       }
+      if (paymentMethod === "cash" && (input.cashTendered ?? 0) < saleTotal) {
+        throw new Error("Cash tendered must cover the sale total");
+      }
     }
+    const cashTendered = paymentMethod === "cash" ? (input.cashTendered ?? null) : null;
 
     const result = this.db
-      .prepare("INSERT INTO orders (ticketNumber, customerName, customerPhone, orderType, deliveryAddress, requestedTime, assignedTo, status, kitchenStatus, counterStatus, requestedById, createdAt, updatedAt, discountAmount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(ticketNumber, input.customerName.trim(), input.customerPhone.trim(), input.orderType, input.orderType === "delivery" || input.deliveryAddress?.street ? JSON.stringify(input.deliveryAddress) : "{}", input.requestedTime.trim(), input.assignedTo?.trim() || null, overallStatus, kitchenStatus, counterStatus, requestedById, now, now, discountAmount);
+      .prepare("INSERT INTO orders (ticketNumber, customerName, customerPhone, orderType, deliveryAddress, requestedTime, assignedTo, status, kitchenStatus, counterStatus, requestedById, createdAt, updatedAt, discountAmount, paymentMethod, cashTendered) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(ticketNumber, input.customerName.trim(), input.customerPhone.trim(), input.orderType, input.orderType === "delivery" || input.deliveryAddress?.street ? JSON.stringify(input.deliveryAddress) : "{}", input.requestedTime.trim(), input.assignedTo?.trim() || null, overallStatus, kitchenStatus, counterStatus, requestedById, now, now, discountAmount, paymentMethod, cashTendered);
 
     const orderId = Number(result.lastInsertRowid);
     const insertItem = this.db.prepare(
@@ -647,7 +652,7 @@ export class KotDatabase {
     const base = `
       SELECT o.id, o.ticketNumber, o.customerName, o.customerPhone, o.orderType,
              o.deliveryAddress, o.requestedTime, o.assignedTo, o.status, o.kitchenStatus, o.counterStatus,
-             o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, u.name as requestedByName,
+             o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, o.paymentMethod, o.cashTendered, u.name as requestedByName,
              oi.id as oi_id, oi.productId as oi_productId, oi.name as oi_name,
              oi.kg as oi_kg, oi.quantity as oi_quantity, oi.notes as oi_notes,
              oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept
@@ -683,7 +688,7 @@ export class KotDatabase {
     const sql = `
       SELECT o.id, o.ticketNumber, o.customerName, o.customerPhone, o.orderType,
              o.deliveryAddress, o.requestedTime, o.assignedTo, o.status, o.kitchenStatus, o.counterStatus,
-             o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, u.name as requestedByName,
+             o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, o.paymentMethod, o.cashTendered, u.name as requestedByName,
              oi.id as oi_id, oi.productId as oi_productId, oi.name as oi_name,
              oi.kg as oi_kg, oi.quantity as oi_quantity, oi.notes as oi_notes,
              oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept
@@ -991,6 +996,8 @@ export class KotDatabase {
       if (!cols.includes("requestedTime")) this.db.exec("ALTER TABLE orders ADD COLUMN requestedTime TEXT NOT NULL DEFAULT ''");
       if (!cols.includes("assignedTo")) this.db.exec("ALTER TABLE orders ADD COLUMN assignedTo TEXT");
       if (!cols.includes("discountAmount")) this.db.exec("ALTER TABLE orders ADD COLUMN discountAmount REAL NOT NULL DEFAULT 0");
+      if (!cols.includes("paymentMethod")) this.db.exec("ALTER TABLE orders ADD COLUMN paymentMethod TEXT NOT NULL DEFAULT 'cash'");
+      if (!cols.includes("cashTendered")) this.db.exec("ALTER TABLE orders ADD COLUMN cashTendered REAL");
     }
 
     // Add stock-tracking columns to products if missing (existing databases)
@@ -1086,7 +1093,9 @@ export class KotDatabase {
         requestedById INTEGER REFERENCES users(id),
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL,
-        discountAmount REAL NOT NULL DEFAULT 0
+        discountAmount REAL NOT NULL DEFAULT 0,
+        paymentMethod TEXT NOT NULL DEFAULT 'cash',
+        cashTendered REAL
       );
 
       CREATE TABLE IF NOT EXISTS order_items (

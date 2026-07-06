@@ -613,6 +613,13 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
   const [category, setCategory] = useState("All");
   const [cart, setCart] = useState<OrderItemInput[]>(() => loadSavedSale().cart);
   const [discount, setDiscount] = useState(() => loadSavedSale().discount);
+  // Opens a dedicated modal to enter/change the discount, rather than a
+  // plain always-visible number field — a bare inline input next to a
+  // dozen other numbers on the receipt is too easy to miss as an actual
+  // feature (same reasoning as why Clear Sale became a real button).
+  const [discountModalOpen, setDiscountModalOpen] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState<"cash" | "card" | null>(null);
+  const [cashTendered, setCashTendered] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   // Only actually required above the R5,000 full-tax-invoice threshold
@@ -697,7 +704,7 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
 
   const removeLine = (index: number) => setCart((cur) => cur.filter((_, i) => i !== index));
 
-  const clearSale = () => { setCart([]); setDiscount(0); setBuyerName(""); setBuyerAddress(""); setError(""); };
+  const clearSale = () => { setCart([]); setDiscount(0); setBuyerName(""); setBuyerAddress(""); setPaymentMethod(null); setCashTendered(""); setError(""); };
 
   // South African retail prices are required to be displayed VAT-inclusive
   // (Consumer Protection Act / VAT Act) — pricePerUnit is already the
@@ -717,7 +724,12 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
   // are needed.
   const FULL_INVOICE_THRESHOLD = 5000;
   const needsFullInvoice = total > FULL_INVOICE_THRESHOLD;
-  const canCheckout = cart.length > 0 && !submitting && (!needsFullInvoice || (buyerName.trim() && buyerAddress.trim()));
+  const tenderedAmount = Number(cashTendered) || 0;
+  const changeDue = paymentMethod === "cash" ? tenderedAmount - total : 0;
+  const canCheckout = cart.length > 0 && !submitting
+    && (!needsFullInvoice || (buyerName.trim() && buyerAddress.trim()))
+    && paymentMethod != null
+    && (paymentMethod !== "cash" || tenderedAmount >= total);
 
   const checkout = async () => {
     if (!canCheckout) return;
@@ -735,7 +747,9 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
       assignedTo: "",
       items: cart,
       completeImmediately: true,
-      discountAmount: clampedDiscount
+      discountAmount: clampedDiscount,
+      paymentMethod: paymentMethod ?? "cash",
+      cashTendered: paymentMethod === "cash" ? tenderedAmount : null
     };
     try {
       const order = await api.orders.create(payload);
@@ -813,11 +827,11 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
           </div>
           <div className="pos-breakdown-row">
             <span>Discount</span>
-            <input
-              type="number" min="0" step="0.01" className="pos-discount-input"
-              value={discount || ""} placeholder="0.00"
-              onChange={(e) => setDiscount(e.target.value ? Number(e.target.value) : 0)}
-            />
+            {clampedDiscount > 0 ? (
+              <span>-{currency.format(clampedDiscount)} <button type="button" className="pos-discount-edit" onClick={() => setDiscountModalOpen(true)}>Edit</button></span>
+            ) : (
+              <button type="button" className="pos-discount-add" onClick={() => setDiscountModalOpen(true)}>+ Add discount</button>
+            )}
           </div>
           {receiptBranding.vatRegistered && (
             <div className="pos-breakdown-row">
@@ -837,6 +851,25 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
             <label>Buyer address<input value={buyerAddress} onChange={(e) => setBuyerAddress(e.target.value)} placeholder="Required for sales over R5,000" /></label>
           </div>
         )}
+
+        <div className="pos-payment-section">
+          <div className="pos-payment-tabs">
+            <button type="button" className={`pos-payment-tab ${paymentMethod === "cash" ? "active" : ""}`} onClick={() => setPaymentMethod("cash")}>Cash</button>
+            <button type="button" className={`pos-payment-tab ${paymentMethod === "card" ? "active" : ""}`} onClick={() => { setPaymentMethod("card"); setCashTendered(""); }}>Card</button>
+          </div>
+          {paymentMethod === "cash" && (
+            <div className="pos-cash-fields">
+              <label>Amount tendered
+                <input type="number" min="0" step="0.01" autoFocus value={cashTendered} onChange={(e) => setCashTendered(e.target.value)} placeholder={currency.format(total)} />
+              </label>
+              <div className={`pos-change-due ${changeDue < 0 ? "short" : ""}`}>
+                <span>{changeDue < 0 ? "Still owing" : "Change due"}</span>
+                <span>{currency.format(Math.abs(changeDue))}</span>
+              </div>
+            </div>
+          )}
+        </div>
+
         {error && <p className="form-error">{error}</p>}
         <div className="pos-receipt-actions">
           <button type="button" className="pos-clear-btn" disabled={cart.length === 0 || submitting} onClick={() => setPendingClearSale(true)}>Clear Sale</button>
@@ -861,6 +894,46 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
           onCancel={() => setPendingClearSale(false)}
         />
       )}
+      {discountModalOpen && (
+        <DiscountModal
+          initialValue={discount}
+          max={subtotal}
+          onApply={(value) => { setDiscount(value); setDiscountModalOpen(false); }}
+          onClose={() => setDiscountModalOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// A flat rand-amount discount, entered as its own deliberate step rather
+// than a bare number field sitting in the breakdown — same reasoning as
+// Clear Sale needing to be a real button, not just easy to miss.
+function DiscountModal({ initialValue, max, onApply, onClose }: { initialValue: number; max: number; onApply: (value: number) => void; onClose: () => void }) {
+  const [value, setValue] = useState(initialValue ? String(initialValue) : "");
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    onApply(Math.min(Math.max(0, Number(value) || 0), max));
+  };
+
+  return (
+    <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal-card panel">
+        <div className="modal-header">
+          <h2>Discount</h2>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </div>
+        <form className="modal-body" onSubmit={submit}>
+          <label>Discount amount (R)
+            <input type="number" min="0" step="0.01" max={max} autoFocus value={value} onChange={(e) => setValue(e.target.value)} placeholder="0.00" />
+          </label>
+          <footer className="actions">
+            {initialValue > 0 && <button type="button" className="danger" onClick={() => onApply(0)}>Remove discount</button>}
+            <button type="submit">Apply</button>
+          </footer>
+        </form>
+      </div>
     </div>
   );
 }
@@ -3252,6 +3325,15 @@ function buildReceiptHtml(order: Order, type: "kitchen" | "counter" | "master", 
   const label = type === "kitchen" ? "KITCHEN ORDER" : type === "counter" ? "COUNTER ORDER"
     : receiptBranding.vatRegistered ? "TAX INVOICE" : "RECEIPT";
 
+  // A plain payment record (cash/card), not a payment integration — this
+  // app never touches card data, so "Card" just means "paid by card
+  // elsewhere" for reconciliation purposes.
+  const paymentLine = isReceipt
+    ? order.paymentMethod === "cash"
+      ? `Paid: Cash — Tendered ${currency.format(order.cashTendered ?? totalDue)}, Change ${currency.format(Math.max(0, (order.cashTendered ?? totalDue) - totalDue))}`
+      : "Paid: Card"
+    : "";
+
   // Shown whenever an address was actually captured — not gated to
   // orderType === "delivery", since a >R5000 POS sale also stores the
   // buyer's address (SARS full tax invoice requirement) on an otherwise
@@ -3319,6 +3401,7 @@ ${isReceipt ? `<div class="totals">
   ${discountAmount > 0 ? `<div class="totals-row"><span>Discount</span><span>-${currency.format(discountAmount)}</span></div>` : ""}
   ${receiptBranding.vatRegistered ? `<div class="totals-row"><span>VAT incl. (15%)</span><span>${currency.format(vatAmount)}</span></div>` : ""}
   <div class="totals-row grand"><span>Total</span><span>${currency.format(totalDue)}</span></div>
+  ${paymentLine ? `<div class="totals-row"><span>${esc(paymentLine)}</span><span></span></div>` : ""}
 </div>` : ""}
 <div class="footer">Thank you for your order — ${siteName}</div>
 </body></html>`;
@@ -3379,6 +3462,7 @@ ${isReceipt ? `
 ${discountAmount > 0 ? `<div class="totals-row"><span>Discount</span><span>-${currency.format(discountAmount)}</span></div>` : ""}
 ${receiptBranding.vatRegistered ? `<div class="totals-row"><span>VAT incl. (15%)</span><span>${currency.format(vatAmount)}</span></div>` : ""}
 <div class="totals-row grand"><span>Total</span><span>${currency.format(totalDue)}</span></div>
+${paymentLine ? `<div class="center" style="font-size:11px;margin-top:4px">${esc(paymentLine)}</div>` : ""}
 <hr class="sep">` : ""}
 <div class="center footer">Thank you for your order</div>
 </body></html>`;
