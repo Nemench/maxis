@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # MAXIS KOT — Proxmox LXC auto-provisioner
 # Run this on the PROXMOX HOST (not inside a container)
-# Usage: bash <(curl -sSL https://raw.githubusercontent.com/Nemench/maxis/main/proxmox-deploy.sh)
+# Usage: bash <(curl -sSL https://raw.githubusercontent.com/Nemench/NemenchPos/main/proxmox-deploy.sh)
 set -euo pipefail
 
 # ── Configurable defaults (override with env vars) ────────────────────────────
@@ -118,7 +118,7 @@ pct exec "$CTID" -- bash -c "
 info "Installing MAXIS inside container $CTID..."
 pct exec "$CTID" -- bash -c "
   export DEBIAN_FRONTEND=noninteractive PORT=${PORT}
-  bash <(curl -sSL https://raw.githubusercontent.com/Nemench/maxis/main/install.sh)
+  bash <(curl -sSL https://raw.githubusercontent.com/Nemench/NemenchPos/main/install.sh)
 "
 
 # ── Get container IP ──────────────────────────────────────────────────────────

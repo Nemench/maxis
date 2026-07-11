@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # MAXIS KOT — one-line installer for Debian/Ubuntu (Proxmox LXC or any server)
-# Usage: curl -sSL https://raw.githubusercontent.com/Nemench/maxis/main/install.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/Nemench/NemenchPos/main/install.sh | bash
 set -euo pipefail
 
-REPO_URL="https://github.com/Nemench/maxis.git"
+REPO_URL="https://github.com/Nemench/NemenchPos.git"
 APP_DIR="/opt/maxis"
 PORT="${PORT:-3000}"
 SERVICE="maxis"

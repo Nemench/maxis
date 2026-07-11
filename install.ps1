@@ -83,7 +83,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 Write-Host "   Git $((& git --version).Split(' ')[2]) at $((Get-Command git).Source)"
 
 # ── 3. Clone or update repo ───────────────────────────────────────────────────
-$RepoUrl = "https://github.com/Nemench/maxis.git"
+$RepoUrl = "https://github.com/Nemench/NemenchPos.git"
 Step "Setting up repository at $InstallDir..."
 if (Test-Path (Join-Path $InstallDir ".git")) {
     Write-Host "   Existing install found — pulling latest code..."

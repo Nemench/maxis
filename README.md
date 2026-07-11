@@ -41,7 +41,7 @@ Each shop runs its own **fully self-contained, offline-first** MAXIS instance (N
 Create a fresh **Debian 12 or Ubuntu 22.04** container or server, then run inside it:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Nemench/maxis/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/Nemench/NemenchPos/main/install.sh | bash
 ```
 
 The script installs Node.js 20, clones the repo, builds the app, and sets up a systemd service that starts automatically on boot.
@@ -65,7 +65,7 @@ bash /opt/maxis/install.sh
 ## Option 2 — Docker Compose
 
 ```bash
-git clone https://github.com/Nemench/maxis.git
+git clone https://github.com/Nemench/NemenchPos.git
 cd maxis
 docker compose up -d
 ```
@@ -98,7 +98,7 @@ npm run dev
 
 ## Option 4 — Windows desktop app (.exe installer)
 
-Download the latest installer from the [Releases page](https://github.com/Nemench/maxis/releases).
+Download the latest installer from the [Releases page](https://github.com/Nemench/NemenchPos/releases).
 
 Double-click `MAXIS-KOT-Setup.exe` to install. The app starts automatically and sits in the **system tray** — left-click the tray icon to open MAXIS in your browser. Other devices on the same network can connect via `http://<this-pc-ip>:3000`.
 
@@ -116,13 +116,13 @@ Open **PowerShell as Administrator** and run:
 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
-irm https://raw.githubusercontent.com/Nemench/maxis/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Nemench/NemenchPos/main/install.ps1 | iex
 ```
 
 Or clone the repo first and run the script directly:
 
 ```powershell
-git clone https://github.com/Nemench/maxis.git C:\opt\maxis
+git clone https://github.com/Nemench/NemenchPos.git C:\opt\maxis
 powershell -ExecutionPolicy Bypass -File C:\opt\maxis\install.ps1
 ```
 
