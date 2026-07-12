@@ -5832,11 +5832,20 @@ function EmailReceiptModal({ order, printStyle, onClose }: { order: Order; print
 // works, used by the "Test" button next to each printer assignment in Settings.
 async function printTestPage(printerName: string): Promise<void> {
   const ts = new Date().toLocaleString(appSettings.locale);
+  // A4, not the receipt/label formats' small custom page sizes (80mm
+  // thermal roll, etc.) — this test needs to work on WHATEVER printer is
+  // assigned, and most real-world printers (any normal office
+  // laser/inkjet, which is a lot more common than a thermal receipt
+  // roll) have no way to produce a tiny 80mm-wide page at all. Sending
+  // one to a printer that only has A4/Letter loaded doesn't error, it
+  // just silently sits there unable to match the requested paper size —
+  // which looks identical to "the printer is broken" from this button,
+  // even though the whole print pipeline is actually working fine.
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-@page{size:80mm auto;margin:0}*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Courier New',Courier,monospace;padding:5mm;font-size:12px;text-align:center;color:#000}
-hr{border:none;border-top:1px dashed #999;margin:6px 0}
-.big{font-size:16px;font-weight:bold}.small{font-size:10px;color:#555}
+@page{size:A4;margin:20mm}*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#000}
+hr{border:none;border-top:1px dashed #999;margin:12px 0}
+.big{font-size:24px;font-weight:bold}.small{font-size:11px;color:#555}
 </style></head><body>
 <div class="big">NemenchPos</div>
 <div>--- TEST PRINT ---</div>
