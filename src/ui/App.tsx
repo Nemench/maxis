@@ -2303,6 +2303,19 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
   // carcass isn't itself "yielded" from another raw carcass.
   const cuttableProducts = useMemo(() => products.filter((p) => !p.isRawIntake), [products]);
 
+  const [search, setSearch] = useState("");
+  const filteredProducts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return products;
+    return products.filter((p) =>
+      p.name.toLowerCase().includes(q) ||
+      p.category.toLowerCase().includes(q) ||
+      p.department.toLowerCase().includes(q) ||
+      (p.barcode ?? "").toLowerCase().includes(q) ||
+      (p.itemCode ?? "").toLowerCase().includes(q)
+    );
+  }, [products, search]);
+
   const loadMissingCost = () => { api.products.missingCost().then(setMissingCost).catch(() => undefined); };
   useEffect(() => { loadMissingCost(); }, []);
 
@@ -2553,10 +2566,19 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
         <EmptyState title="No items yet" detail="Add your first item using the form on the left." />
       ) : (
         <div className="panel table-panel">
+          <div className="search-bar-row">
+            <div className="search-bar">
+              <input placeholder="Search by name, category, dept, barcode or item code…" value={search} onChange={(e) => setSearch(e.target.value)} />
+              {search && <button type="button" className="search-clear" onClick={() => setSearch("")}>×</button>}
+            </div>
+          </div>
+          {filteredProducts.length === 0 ? (
+            <EmptyState title="No matches" detail="No items match that search." />
+          ) : (
           <table>
             <thead><tr><th>Name</th><th>Category</th><th>Dept</th><th>R/kg</th><th>On hand</th><th>Notes</th><th></th></tr></thead>
             <tbody>
-              {products.map((p) => {
+              {filteredProducts.map((p) => {
                 const low = p.lowStockThreshold != null && p.onHandQty <= p.lowStockThreshold;
                 return (
                 <tr key={p.id}>
@@ -2575,6 +2597,7 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
               })}
             </tbody>
           </table>
+          )}
         </div>
       )}
       {weighScanOpen && (
@@ -2716,6 +2739,13 @@ function StockTakePanel({ products, currentUser, onChanged }: { products: Produc
 
   useEffect(() => { loadRows(); }, [locationId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const [search, setSearch] = useState("");
+  const filteredRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((r) => r.productName.toLowerCase().includes(q) || r.category.toLowerCase().includes(q));
+  }, [rows, search]);
+
   const submitCount = async (productId: number, value: string) => {
     if (!locationId || value === "") return;
     const qty = Number(value);
@@ -2794,10 +2824,19 @@ function StockTakePanel({ products, currentUser, onChanged }: { products: Produc
         </div>
         <p className="settings-hint">Enter what you physically count for each item — the system works out and applies the change itself.</p>
         {msg && <div className="form-message">{msg}</div>}
+        <div className="search-bar-row">
+          <div className="search-bar">
+            <input placeholder="Search by name or category…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            {search && <button type="button" className="search-clear" onClick={() => setSearch("")}>×</button>}
+          </div>
+        </div>
+        {filteredRows.length === 0 ? (
+          <EmptyState title="No matches" detail="No items match that search." />
+        ) : (
         <table>
           <thead><tr><th>Name</th><th>Category</th><th>Current</th><th>Count</th><th>Last counted</th></tr></thead>
           <tbody>
-            {rows.map((r) => {
+            {filteredRows.map((r) => {
               const threshold = thresholdByProductId.get(r.productId);
               const low = threshold != null && r.qty <= threshold;
               return (
@@ -2822,6 +2861,7 @@ function StockTakePanel({ products, currentUser, onChanged }: { products: Produc
             })}
           </tbody>
         </table>
+        )}
       </div>
       {pendingRemoveLocation && (
         <PinConfirmModal
