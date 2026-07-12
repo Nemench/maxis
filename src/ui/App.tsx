@@ -3626,7 +3626,7 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
         </div>
         {emailNotificationsEnabled && (
           <>
-            <p className="settings-hint">Placeholders: {"{{customerName}}"}, {"{{ticketNumber}}"}, {"{{amount}}"} (amount is only meaningful in the payment-received email). Leave a subject blank to skip sending that event's email.</p>
+            <p className="settings-hint">Placeholders: {"{{customerName}}"}, {"{{ticketNumber}}"}, {"{{amount}}"} (amount is only meaningful in the payment-received email), {"{{fulfillment}}"} (order-ready only — automatically says "ready for collection" or "out for delivery" depending on how the order was placed). Leave a subject blank to skip sending that event's email.</p>
             <div className="setting-row">
               <div className="setting-info"><strong>Order ready — subject</strong></div>
               <input value={emailOrderReadySubject} onChange={(e) => setEmailOrderReadySubject(e.target.value)}
@@ -3636,7 +3636,7 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
               <div className="setting-info"><strong>Order ready — body</strong></div>
               <textarea value={emailOrderReadyBody} onChange={(e) => setEmailOrderReadyBody(e.target.value)}
                 onBlur={(e) => void saveEmailTemplate("emailOrderReadyBody", e.target.value.trim())} rows={3}
-                placeholder="Hi {{customerName}}, your order #{{ticketNumber}} is ready for collection!" />
+                placeholder="Hi {{customerName}}, your order #{{ticketNumber}} is {{fulfillment}}!" />
             </div>
             <div className="setting-row">
               <div className="setting-info"><strong>Payment received — subject</strong></div>

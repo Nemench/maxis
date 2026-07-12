@@ -25,7 +25,7 @@ export interface WhatsappTemplateConfig {
 // MUST be replaced with the exact names Meta approves (template names are
 // fixed at submission time and cannot be renamed after approval).
 const FALLBACK_TEMPLATES: WhatsappTemplateConfig[] = [
-  { name: "order_ready_v1", category: "utility", bodyTemplate: "Hi {{1}}, your order #{{2}} is ready for collection!" },
+  { name: "order_ready_v1", category: "utility", bodyTemplate: "Hi {{1}}, your order #{{2}} is {{3}}!" },
   { name: "payment_received_v1", category: "utility", bodyTemplate: "Hi {{1}}, we've received your payment of {{2}} for order #{{3}}. Thank you!" }
 ];
 

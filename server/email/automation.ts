@@ -12,10 +12,10 @@ import { buildSimpleReceiptHtml } from "./receipt.js";
 
 export type EmailEvent = "order_ready" | "payment_received";
 
-// {{customerName}} / {{ticketNumber}} / {{amount}} — plain string
-// substitution, not the WhatsApp templates' positional-array shape, since
-// there's no pre-approval process constraining what an admin can write
-// into the subject/body settings fields.
+// {{customerName}} / {{ticketNumber}} / {{amount}} / {{fulfillment}} —
+// plain string substitution, not the WhatsApp templates' positional-array
+// shape, since there's no pre-approval process constraining what an admin
+// can write into the subject/body settings fields.
 function renderTemplate(template: string, vars: Record<string, string>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (_match, key) => vars[key] ?? "");
 }
@@ -39,7 +39,11 @@ export function triggerEmailNotification(event: EmailEvent, order: Order): boole
     const vars = {
       customerName: order.customerName?.trim() || "there",
       ticketNumber: order.ticketNumber,
-      amount: `R${amount.toFixed(2)}`
+      amount: `R${amount.toFixed(2)}`,
+      // Lets a single order_ready template read correctly either way,
+      // rather than always saying "ready for collection" regardless of
+      // how the order is actually meant to reach the customer.
+      fulfillment: order.orderType === "delivery" ? "out for delivery" : "ready for collection"
     };
 
     const subject = renderTemplate(subjectTemplate, vars);

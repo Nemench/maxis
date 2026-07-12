@@ -20,7 +20,11 @@ import { sendEmail } from "../email/mailer.js";
 // on this same check rather than a second one.
 function maybeTriggerOrderReady(previousStatus: OrderStatus, order: Order): void {
   if (order.status !== "Ready" || previousStatus === "Ready") return;
-  triggerAutomation("order_ready", order.crmContactId, { args: [order.customerName || "there", order.ticketNumber] });
+  // 3rd param says whether it's ready for collection or out for delivery
+  // — if you've already submitted a real Meta template for order_ready
+  // with only 2 body variables, adding this 3rd one means resubmitting an
+  // updated template for approval before it'll actually send correctly.
+  triggerAutomation("order_ready", order.crmContactId, { args: [order.customerName || "there", order.ticketNumber, order.orderType === "delivery" ? "out for delivery" : "ready for collection"] });
   triggerEmailNotification("order_ready", order);
 }
 
