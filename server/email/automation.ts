@@ -9,6 +9,7 @@
 import { db } from "../index.js";
 import type { Order } from "../../src/shared/types.js";
 import { buildSimpleReceiptHtml } from "./receipt.js";
+import { resolvePublicBaseUrl } from "./publicUrl.js";
 
 export type EmailEvent = "order_ready" | "payment_received";
 
@@ -24,7 +25,10 @@ function escHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-export function triggerEmailNotification(event: EmailEvent, order: Order): boolean {
+// `requestOrigin` is the triggering HTTP request's own origin (see
+// server/routes/orders.ts), used only as a last-resort fallback if no
+// publicBaseUrl is explicitly configured — see resolvePublicBaseUrl.
+export function triggerEmailNotification(event: EmailEvent, order: Order, requestOrigin?: string): boolean {
   try {
     if (!order.customerEmail) return false; // no email captured at checkout — nothing to do
 
@@ -50,7 +54,8 @@ export function triggerEmailNotification(event: EmailEvent, order: Order): boole
     const body = renderTemplate(bodyTemplate, vars);
     // The admin's own message goes above a simple itemized receipt — see
     // server/email/receipt.ts for why this isn't the exact printed layout.
-    const receiptHtml = buildSimpleReceiptHtml(order, settings);
+    const publicBaseUrl = resolvePublicBaseUrl(settings, requestOrigin);
+    const receiptHtml = buildSimpleReceiptHtml(order, settings, publicBaseUrl);
     const htmlBody = `<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto 20px;color:#1a1a2e;white-space:pre-wrap;">${escHtml(body)}</div>${receiptHtml}`;
 
     db.enqueueEmail(order.id, order.customerEmail, subject, body, htmlBody);

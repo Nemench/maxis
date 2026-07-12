@@ -775,7 +775,7 @@ th {
 
   .workspace { padding: 16px; }
 
-  .form-grid, .products-layout { grid-template-columns: 1fr; }
+  .form-grid, .products-layout, .settings-panel { grid-template-columns: 1fr; }
   .line-row { grid-template-columns: 1fr 60px 60px; }
   .printer-assignments { grid-template-columns: 1fr; }
   .table-panel { overflow-x: auto; }
@@ -1418,23 +1418,37 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover {
 }
 
 /* ── Settings panel ── */
+/* Auto-fill grid so each settings section is its own card that reflows to
+   fill however much screen width is available, rather than every section
+   stacking full-width in a single 600px-capped column with empty space
+   beside it on anything wider than a phone. */
 .settings-panel {
-  max-width: 600px;
+  max-width: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 20px;
+  align-items: start;
 }
 
 .settings-panel > h2 {
+  grid-column: 1 / -1;
   font-size: 18px;
   font-weight: 700;
   color: var(--accent-text);
-  margin-bottom: 20px;
+  margin-bottom: 0;
 }
 
 .settings-section {
   border: 1.5px solid var(--border);
   border-radius: 10px;
   overflow: hidden;
-  margin-bottom: 20px;
+  margin-bottom: 0;
 }
+
+/* A couple of sections carry enough content (product catalog import/export
+   hints, backup/restore, email marketing) that squeezing them into one grid
+   column looks cramped — see .span-full (defined with .products-layout)
+   for the shared "grid-column: 1 / -1" rule applied to those below. */
 
 /* Section title bar — used both standalone (h3) and with a button (div) */
 .settings-section > h3,

@@ -203,7 +203,10 @@ EMAIL_SMTP_PORT=<usually 587 (STARTTLS) or 465 (TLS); defaults to 587>
 EMAIL_SMTP_USER=<the mailbox/account username to authenticate as>
 EMAIL_SMTP_PASS=<its password or app-specific password — real secret, local-only>
 EMAIL_FROM_ADDRESS=<the address customers see as the sender — most providers require this to match EMAIL_SMTP_USER's account/domain>
+PUBLIC_BASE_URL=<your real public web address, e.g. https://yourshop.com — also settable from Settings → Email notifications → Public URL>
 ```
+
+`PUBLIC_BASE_URL` deserves a callout even though it's optional: it's what makes your logo (and any campaign promo images) actually show up in emails. Mail clients like Gmail and Outlook strip embedded images from received mail and obviously can't reach a local network address, so without a real public URL configured, images are simply left out of emails rather than showing up broken. Unsubscribe links in campaign emails need it too.
 
 ---
 

@@ -1,7 +1,7 @@
 // Thin typed wrapper around the backend REST API. Every call goes through
 // req()/download(), which attach the JWT and centrally handle a 401 (token
 // missing/expired) by clearing it and forcing a reload back to the login screen.
-import type { User, UserInput, Product, ProductInput, QuickCreateProductInput, Order, OrderItemInput, CreateOrderInput, OrderStatus, Department, DeptStatus, Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput, StockLocation, ProductStockRow, ItemSalesStat, ItemStockMovementStat, StatisticsOverview, MarginOverview, YieldEstimate, YieldEstimateInput, PendingYieldConversion, CrmContact, CrmContactInput, CrmContactDetail, CrmTag, CrmMessage, CrmAutomationRule, ConsentStatus, EmailSubscriber } from "../shared/types";
+import type { User, UserInput, Product, ProductInput, QuickCreateProductInput, Order, OrderItemInput, CreateOrderInput, OrderStatus, Department, DeptStatus, Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput, StockLocation, ProductStockRow, ItemSalesStat, ItemStockMovementStat, StatisticsOverview, MarginOverview, YieldEstimate, YieldEstimateInput, PendingYieldConversion, CrmContact, CrmContactInput, CrmContactDetail, CrmTag, CrmMessage, CrmAutomationRule, ConsentStatus, EmailSubscriber, CampaignPromo } from "../shared/types";
 import { tokenStorage } from "./tokenStorage";
 
 // The native Android app now live-loads its own server's page directly
@@ -107,7 +107,7 @@ export const api = {
   settings: {
     get: () => req<Record<string, string>>("GET", "/settings"),
     set: (data: Record<string, string>) => req<Record<string, string>>("PUT", "/settings", data),
-    public: () => req<{ siteName: string; logoUrl: string; themeColor: string; vatRegistered: boolean; vatNumber: string; businessAddress: string }>("GET", "/settings/public"),
+    public: () => req<{ siteName: string; logoUrl: string; themeColor: string; vatRegistered: boolean; vatNumber: string; businessAddress: string; publicBaseUrl: string }>("GET", "/settings/public"),
     uploadLogo: (dataUrl: string) => req<{ logoUrl: string }>("POST", "/settings/logo", { dataUrl }),
     licenseStatus: () => req<{ licenseStatus: string; gracePeriodEndsAt: string | null }>("GET", "/settings/license-status"),
     testEmail: (to: string) => req<{ ok: boolean }>("POST", "/settings/email-test", { to })
@@ -174,6 +174,8 @@ export const api = {
     add: (email: string, name: string) => req<EmailSubscriber>("POST", "/email-subscribers", { email, name }),
     setStatus: (id: string, status: "subscribed" | "unsubscribed") => req<EmailSubscriber>("PATCH", `/email-subscribers/${id}`, { status }),
     remove: (id: string) => req<{ success: boolean }>("DELETE", `/email-subscribers/${id}`),
-    sendCampaign: (subject: string, body: string) => req<{ queued: number }>("POST", "/email-subscribers/send-campaign", { subject, body })
+    uploadCampaignImage: (dataUrl: string) => req<{ imageUrl: string }>("POST", "/email-subscribers/campaign-image", { dataUrl }),
+    sendCampaign: (subject: string, body: string, promo?: CampaignPromo) =>
+      req<{ queued: number }>("POST", "/email-subscribers/send-campaign", { subject, body, promo })
   }
 };

@@ -102,17 +102,16 @@ function applyBranding(siteName: string, logoUrl: string) {
 
 // Plain module cache so receipt-building functions (outside the React tree) can
 // read live branding without threading it through every print call site.
-let receiptBranding = { siteName: "NemenchPos", logoUrl: "", themeColor: "", vatRegistered: false, vatNumber: "", businessAddress: "" };
+let receiptBranding = { siteName: "NemenchPos", logoUrl: "", themeColor: "", vatRegistered: false, vatNumber: "", businessAddress: "", publicBaseUrl: "" };
 
-// Receipts/emails embed the logo as a base64 data URI rather than
-// referencing it by an absolute URL — a URL only actually resolves for
-// whoever can reach this server. That's fine for an on-screen print
-// preview on the same device/network, but never true for an emailed
-// receipt opened on a customer's own device (especially for a LAN-only
-// deployment with no public domain), so the image just silently failed to
-// load there. Fetched once whenever the logo actually changes and cached
-// here; buildReceiptHtml falls back to the plain URL only in the brief
-// window before the very first fetch completes.
+// For the PRINT path only: embed the logo as a base64 data URI rather than
+// referencing it by URL, so the print preview/PDF render correctly even
+// with a flaky connection to this server. Data URIs are deliberately NOT
+// used for email (see buildReceiptHtml's forEmail branch below) — major
+// mail clients (Gmail, Outlook) strip inline data: URIs from received HTML
+// as an anti-spam measure, so a technically-valid data URI still never
+// renders for a real recipient. Fetched once whenever the logo actually
+// changes and cached here.
 let logoDataUri: string | null = null;
 let logoDataUriFor = "";
 
@@ -209,7 +208,7 @@ export function App() {
     api.settings.public().then((s) => {
       setBranding({ siteName: s.siteName, logoUrl: s.logoUrl });
       applyBranding(s.siteName, s.logoUrl);
-      setReceiptBranding({ siteName: s.siteName, logoUrl: s.logoUrl, themeColor: s.themeColor, vatRegistered: s.vatRegistered, vatNumber: s.vatNumber, businessAddress: s.businessAddress });
+      setReceiptBranding({ siteName: s.siteName, logoUrl: s.logoUrl, themeColor: s.themeColor, vatRegistered: s.vatRegistered, vatNumber: s.vatNumber, businessAddress: s.businessAddress, publicBaseUrl: s.publicBaseUrl });
       if (s.themeColor) applyTheme(s.themeColor);
     }).catch(() => undefined);
   }, []);
@@ -2931,10 +2930,18 @@ function EmailSubscribersPanel() {
   const [newEmail, setNewEmail] = useState("");
   const [newName, setNewName] = useState("");
   const [adding, setAdding] = useState(false);
+  const [mode, setMode] = useState<"plain" | "discount">("plain");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
+  const [headline, setHeadline] = useState("");
+  const [discountLabel, setDiscountLabel] = useState("");
+  const [description, setDescription] = useState("");
+  const [validUntil, setValidUntil] = useState("");
+  const [imageUrl, setImageUrl] = useState("");
+  const [uploadingImage, setUploadingImage] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState("");
+  const promoImageInputRef = useRef<HTMLInputElement>(null);
 
   const load = () => {
     setLoading(true);
@@ -2961,13 +2968,40 @@ function EmailSubscribersPanel() {
     load();
   };
 
+  const uploadPromoImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingImage(true);
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const { imageUrl: uploaded } = await api.emailSubscribers.uploadCampaignImage(dataUrl);
+      setImageUrl(uploaded);
+    } catch (err) {
+      setSendResult(err instanceof Error ? err.message : "Image upload failed");
+    } finally {
+      setUploadingImage(false);
+      if (promoImageInputRef.current) promoImageInputRef.current.value = "";
+    }
+  };
+
+  const discountHasContent = headline.trim() || discountLabel.trim() || description.trim() || imageUrl;
+  const canSend = mode === "plain" ? subject.trim() && body.trim() : subject.trim() && discountHasContent;
+
   const sendCampaign = async () => {
-    if (!subject.trim() || !body.trim()) return;
+    if (!canSend) return;
     setSending(true); setSendResult("");
     try {
-      const result = await api.emailSubscribers.sendCampaign(subject.trim(), body.trim());
+      const promo = mode === "discount"
+        ? { headline: headline.trim() || undefined, discountLabel: discountLabel.trim() || undefined, description: description.trim() || undefined, validUntil: validUntil || undefined, imageUrl: imageUrl || undefined }
+        : undefined;
+      const result = await api.emailSubscribers.sendCampaign(subject.trim(), body.trim(), promo);
       setSendResult(`Queued for ${result.queued} subscriber${result.queued === 1 ? "" : "s"}.`);
-      setSubject(""); setBody("");
+      setSubject(""); setBody(""); setHeadline(""); setDiscountLabel(""); setDescription(""); setValidUntil(""); setImageUrl("");
     } catch (err) {
       setSendResult(err instanceof Error ? err.message : "Failed to send campaign");
     } finally {
@@ -2979,11 +3013,39 @@ function EmailSubscribersPanel() {
     <div>
       <div className="setting-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
         <strong>Send a campaign</strong>
-        <p className="settings-hint">Send a news/deals email to every subscribed address below. Each recipient gets a working unsubscribe link.</p>
+        <p className="settings-hint">Send a news/deals email to every subscribed address below. Each recipient gets a working unsubscribe link. Logo/promo images only render in the email if a Public URL is set under Email notifications above.</p>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="button" className={mode === "plain" ? "active" : "secondary"} onClick={() => setMode("plain")}>Plain message</button>
+          <button type="button" className={mode === "discount" ? "active" : "secondary"} onClick={() => setMode("discount")}>Discount banner (picture-style)</button>
+        </div>
         <input placeholder="Subject" value={subject} onChange={(e) => setSubject(e.target.value)} />
-        <textarea placeholder="Message" rows={5} value={body} onChange={(e) => setBody(e.target.value)} />
+
+        {mode === "discount" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, border: "1px solid var(--border)", borderRadius: 8, padding: 12 }}>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input placeholder="Headline (e.g. Weekend Special)" value={headline} onChange={(e) => setHeadline(e.target.value)} />
+              <input placeholder="Discount (e.g. 20% OFF)" value={discountLabel} onChange={(e) => setDiscountLabel(e.target.value)} />
+            </div>
+            <input placeholder="Short description (optional)" value={description} onChange={(e) => setDescription(e.target.value)} />
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <label className="settings-hint" style={{ margin: 0 }}>Valid until</label>
+              <input type="date" value={validUntil} onChange={(e) => setValidUntil(e.target.value)} />
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input ref={promoImageInputRef} type="file" accept="image/png,image/jpeg,image/webp" style={{ display: "none" }} onChange={(e) => void uploadPromoImage(e)} />
+              <button type="button" className="secondary" disabled={uploadingImage} onClick={() => promoImageInputRef.current?.click()}>
+                {uploadingImage ? "Uploading…" : imageUrl ? "Replace promo image" : "Upload promo image"}
+              </button>
+              {imageUrl && <img src={assetUrl(imageUrl)} alt="Promo" style={{ height: 40, borderRadius: 4 }} />}
+              {imageUrl && <button type="button" className="secondary" onClick={() => setImageUrl("")}>Remove</button>}
+            </div>
+            <textarea placeholder="Extra message below the banner (optional)" rows={3} value={body} onChange={(e) => setBody(e.target.value)} />
+          </div>
+        )}
+        {mode === "plain" && <textarea placeholder="Message" rows={5} value={body} onChange={(e) => setBody(e.target.value)} />}
+
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <button type="button" disabled={sending || !subject.trim() || !body.trim()} onClick={() => void sendCampaign()}>
+          <button type="button" disabled={sending || !canSend} onClick={() => void sendCampaign()}>
             {sending ? "Sending…" : `Send to ${subscribedCount} subscriber${subscribedCount === 1 ? "" : "s"}`}
           </button>
           {sendResult && <span className="muted">{sendResult}</span>}
@@ -3227,6 +3289,7 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
   const [emailSmtpPassInput, setEmailSmtpPassInput] = useState("");
   const [emailSmtpPassSet, setEmailSmtpPassSet] = useState(false);
   const [emailFromAddress, setEmailFromAddress] = useState("");
+  const [publicBaseUrl, setPublicBaseUrl] = useState("");
   const [savingEmailConfig, setSavingEmailConfig] = useState(false);
   const [pendingEmailConfigSave, setPendingEmailConfigSave] = useState(false);
   const [testEmailTo, setTestEmailTo] = useState("");
@@ -3287,6 +3350,7 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
       setEmailSmtpUser(s.emailSmtpUser ?? "");
       setEmailSmtpPassSet(s.emailSmtpPassSet === "true");
       setEmailFromAddress(s.emailFromAddress ?? "");
+      setPublicBaseUrl(s.publicBaseUrl ?? "");
       // Pre-select the matching provider preset on load, so returning to
       // this screen doesn't just show "Other/custom" for a Gmail account
       // that was already set up.
@@ -3590,7 +3654,7 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
         </div>
       </section>
 
-      <section className="settings-section">
+      <section className="settings-section span-full">
         <h3>Products</h3>
         <div className="setting-row">
           <div className="setting-info">
@@ -3732,7 +3796,7 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
         </div>
       </section>
 
-      <section className="settings-section">
+      <section className="settings-section span-full">
         <h3>Email notifications</h3>
         <p className="settings-hint">Sends an email automatically when a customer gives an email address at checkout (POS or New Order) and their order becomes Ready, or (POS only) when payment is taken — completely independent of the WhatsApp/CRM system above. Two things are needed: an email account to send from (below), and this switched on.</p>
 
@@ -3775,6 +3839,20 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
             {savingEmailConfig ? "Saving…" : "Save email account (PIN required)"}
           </button>
         </footer>
+
+        <div className="setting-row">
+          <div className="setting-info">
+            <strong>Public URL</strong>
+            <p>The real, public web address customers can reach (e.g. https://yourshop.com). Required for your logo and any campaign images to actually display in emails — email apps like Gmail and Outlook block embedded images and can't reach a local network address, so without this the logo/images are simply left out of emails rather than showing broken.</p>
+          </div>
+          <input value={publicBaseUrl} onChange={(e) => setPublicBaseUrl(e.target.value)}
+            onBlur={(e) => {
+              const trimmed = e.target.value.trim().replace(/\/+$/, "");
+              setPublicBaseUrl(trimmed);
+              void saveEmailTemplate("publicBaseUrl", trimmed);
+              setReceiptBranding({ publicBaseUrl: trimmed });
+            }} placeholder="https://yourshop.com" />
+        </div>
 
         <div className="setting-row">
           <div className="setting-info">
@@ -4531,7 +4609,15 @@ function buildReceiptHtml(order: Order, type: "kitchen" | "counter" | "master", 
   const d = new Date(order.createdAt);
   const dateStr = d.toLocaleDateString(appSettings.locale);
   const timeStr = d.toLocaleTimeString(appSettings.locale, { hour: "2-digit", minute: "2-digit" });
-  const logoUrl = logoDataUri ?? assetUrl(receiptBranding.logoUrl || "/logo.jpg");
+  // Print: a data URI (works offline, no server round trip needed to render
+  // the preview). Email: a real URL against the configured public base URL
+  // - a data URI would just get stripped by the recipient's mail client
+  // (see the receiptBranding comment above) - or no image at all if no
+  // public base URL has been configured, rather than a link that's
+  // guaranteed unreachable.
+  const logoUrl = forEmail
+    ? (receiptBranding.publicBaseUrl ? `${receiptBranding.publicBaseUrl}${receiptBranding.logoUrl || "/logo.jpg"}` : "")
+    : (logoDataUri ?? assetUrl(receiptBranding.logoUrl || "/logo.jpg"));
   const siteName = esc(receiptBranding.siteName || "NemenchPos");
   const { blue, blueDark } = deriveShades(/^#[0-9a-f]{6}$/i.test(receiptBranding.themeColor) ? receiptBranding.themeColor : "#1a47a0");
 
@@ -4612,7 +4698,7 @@ ${forEmail ? '<div style="max-width:480px;margin:0 auto;padding:16px;box-sizing:
       ${receiptBranding.vatRegistered && receiptBranding.vatNumber ? `VAT Reg. No: ${esc(receiptBranding.vatNumber)}` : ""}
     </div>` : ""}
   </div>
-  <div class="hdr-right"><img class="logo" src="${logoUrl}" alt="${siteName}"><div class="tnum">${esc(order.ticketNumber)}</div><div class="dt">${dateStr} &nbsp; ${timeStr}</div></div>
+  <div class="hdr-right">${logoUrl ? `<img class="logo" src="${logoUrl}" alt="${siteName}">` : ""}<div class="tnum">${esc(order.ticketNumber)}</div><div class="dt">${dateStr} &nbsp; ${timeStr}</div></div>
 </div>
 ${order.customerName ? `<div class="cbox">
   <div class="clbl">Customer Details</div>
@@ -4668,7 +4754,7 @@ body{font-family:'Courier New',Courier,monospace;font-size:12px;width:72mm;paddi
 </style></head><body>
 ${forEmail ? '<div style="max-width:380px;margin:0 auto;padding:16px;box-sizing:border-box;">' : ""}
 <div class="center">
-  <img class="logo" src="${logoUrl}" alt="${siteName}">
+  ${logoUrl ? `<img class="logo" src="${logoUrl}" alt="${siteName}">` : ""}
   <div class="shop">${siteName}</div>
   <div class="lbl">${esc(label)}${isFullTaxInvoice ? " (Full)" : ""}</div>
   ${isReceipt && (receiptBranding.businessAddress || (receiptBranding.vatRegistered && receiptBranding.vatNumber)) ? `<div class="legal">
@@ -4971,7 +5057,8 @@ function EmailReceiptModal({ order, printStyle, onClose }: { order: Order; print
     if (!trimmed) return;
     setSending(true); setResult("");
     try {
-      await ensureLogoDataUri();
+      // forEmail (true) builds the logo src against publicBaseUrl, not the
+      // data-URI cache ensureLogoDataUri populates — that's print-only now.
       const html = buildReceiptHtml(order, "master", resolvePrintStyle("master", printStyle), true);
       await api.orders.emailReceipt(order.id, trimmed, html);
       setResult("Sent!");

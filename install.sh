@@ -33,6 +33,13 @@ EMAIL_SMTP_PORT="${EMAIL_SMTP_PORT:-587}"
 EMAIL_SMTP_USER="${EMAIL_SMTP_USER:-}"
 EMAIL_SMTP_PASS="${EMAIL_SMTP_PASS:-}"
 EMAIL_FROM_ADDRESS="${EMAIL_FROM_ADDRESS:-}"
+# Real, publicly-reachable web address (e.g. https://yourshop.com) used to
+# build image/unsubscribe links inside emails. Without this, the logo and
+# any campaign images are left out of emails rather than embedded broken —
+# mail clients strip inline data: images and can't reach a LAN address.
+# Also settable from the app itself (Settings → Email notifications →
+# Public URL); this env var is just an alternate way to set the same value.
+PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
 
 RED='\033[0;31m'; BLUE='\033[0;34m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${BLUE}▶ $*${NC}"; }
@@ -177,6 +184,7 @@ Environment=EMAIL_SMTP_PORT=${EMAIL_SMTP_PORT:-}
 Environment=EMAIL_SMTP_USER=${EMAIL_SMTP_USER:-}
 Environment=EMAIL_SMTP_PASS=${EMAIL_SMTP_PASS:-}
 Environment=EMAIL_FROM_ADDRESS=${EMAIL_FROM_ADDRESS:-}
+Environment=PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
 
 [Install]
 WantedBy=multi-user.target

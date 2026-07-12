@@ -18,14 +18,14 @@ import { sendEmail } from "../email/mailer.js";
 // KotDatabase instance — importing it from database.ts would be circular.
 // Fires both channels off the same computed transition — email piggybacks
 // on this same check rather than a second one.
-function maybeTriggerOrderReady(previousStatus: OrderStatus, order: Order): void {
+function maybeTriggerOrderReady(previousStatus: OrderStatus, order: Order, requestOrigin: string): void {
   if (order.status !== "Ready" || previousStatus === "Ready") return;
   // 3rd param says whether it's ready for collection or out for delivery
   // — if you've already submitted a real Meta template for order_ready
   // with only 2 body variables, adding this 3rd one means resubmitting an
   // updated template for approval before it'll actually send correctly.
   triggerAutomation("order_ready", order.crmContactId, { args: [order.customerName || "there", order.ticketNumber, order.orderType === "delivery" ? "out for delivery" : "ready for collection"] });
-  triggerEmailNotification("order_ready", order);
+  triggerEmailNotification("order_ready", order, requestOrigin);
 }
 
 const router = Router();
@@ -73,7 +73,7 @@ router.post("/", (req: AuthRequest, res) => {
       triggerAutomation("payment_received", order.crmContactId, {
         args: [order.customerName || "there", `R${(order.items.reduce((s, i) => s + (i.lineTotal ?? 0), 0) - order.discountAmount).toFixed(2)}`, order.ticketNumber]
       });
-      triggerEmailNotification("payment_received", order);
+      triggerEmailNotification("payment_received", order, `${req.protocol}://${req.get("host")}`);
     }
     res.status(201).json(order);
   }
@@ -104,7 +104,7 @@ router.patch("/:id/status", (req, res) => {
     const id = Number(req.params.id);
     const previousStatus = db.getOrder(id).status;
     const order = db.updateOrderStatus(id, req.body.status as OrderStatus);
-    maybeTriggerOrderReady(previousStatus, order);
+    maybeTriggerOrderReady(previousStatus, order, `${req.protocol}://${req.get("host")}`);
     res.json(order);
   }
   catch (err) { res.status(400).json({ message: err instanceof Error ? err.message : "Failed to update status" }); }
@@ -126,7 +126,7 @@ router.patch("/:id/dept-status", (req: AuthRequest, res) => {
     const id = Number(req.params.id);
     const previousStatus = db.getOrder(id).status;
     const order = db.updateDeptStatus(id, department, status);
-    maybeTriggerOrderReady(previousStatus, order);
+    maybeTriggerOrderReady(previousStatus, order, `${req.protocol}://${req.get("host")}`);
     res.json(order);
   } catch (err) { res.status(400).json({ message: err instanceof Error ? err.message : "Failed to update status" }); }
 });
@@ -152,7 +152,7 @@ router.post("/:id/email-receipt", (req: AuthRequest, res) => {
   let order: Order;
   try { order = db.getOrder(id); }
   catch (err) { res.status(404).json({ message: err instanceof Error ? err.message : "Not found" }); return; }
-  sendEmail(to, `Your receipt — #${order.ticketNumber}`, "Your receipt is attached. If your email doesn't show it, please contact us.", html)
+  sendEmail(to, `Your receipt - #${order.ticketNumber}`, "Your receipt is attached. If your email doesn't show it, please contact us.", html)
     .then((result) => {
       if (result.ok) res.json({ ok: true });
       else res.status(400).json({ message: result.error ?? "Send failed" });

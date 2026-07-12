@@ -474,6 +474,17 @@ export interface EmailSubscriber {
   updatedAt: string;
 }
 
+// Optional "picture-style" discount banner for a campaign email (see
+// server/email/campaign.ts) — all fields optional, purely promotional
+// copy/imagery, not wired into checkout/orders in any way.
+export interface CampaignPromo {
+  headline?: string;
+  discountLabel?: string;
+  description?: string;
+  validUntil?: string;
+  imageUrl?: string;
+}
+
 // A contact plus enough context for the admin CRM "send message" box to
 // decide what it's allowed to show — computed server-side (see GET
 // /api/crm/contacts/:id) rather than the client re-deriving the 24h

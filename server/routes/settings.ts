@@ -9,6 +9,7 @@ import { requireAuth, requireAdmin } from "../auth.js";
 import type { AuthRequest } from "../auth.js";
 import { getBusinessProfile } from "../controlPlaneSync.js";
 import { sendEmail } from "../email/mailer.js";
+import { resolvePublicBaseUrl } from "../email/publicUrl.js";
 
 const router = Router();
 
@@ -23,11 +24,12 @@ const ALLOWED_LOGO_TYPES: Record<string, string> = {
 // vatNumber/businessAddress/vatRegistered are included too (not sensitive —
 // they're printed on every receipt anyway) so buildReceiptHtml can read them
 // from the same cache without a separate authenticated round trip.
-router.get("/public", (_req, res) => {
+router.get("/public", (req, res) => {
   const s = db.getAllSettings();
   res.json({
     siteName: s.siteName || "NemenchPos", logoUrl: s.logoUrl || "", themeColor: s.themeColor || "",
-    vatRegistered: s.vatRegistered === "true", vatNumber: s.vatNumber || "", businessAddress: s.businessAddress || ""
+    vatRegistered: s.vatRegistered === "true", vatNumber: s.vatNumber || "", businessAddress: s.businessAddress || "",
+    publicBaseUrl: resolvePublicBaseUrl(s, `${req.protocol}://${req.get("host")}`)
   });
 });
 

@@ -6,12 +6,15 @@
 // browser-only state (a client-side branding cache, locale-aware
 // Intl.NumberFormat) that doesn't exist in this process. This one reads
 // settings directly from the DB - real receipt content (itemized list,
-// VAT, total, payment method), just not a pixel match. The logo is
-// embedded as a base64 data URI (same reasoning as the client's
-// logoDataUri cache): a remote URL would only resolve for whoever can
-// reach this server, which is never guaranteed for an emailed receipt.
-import fs from "fs";
-import path from "path";
+// VAT, total, payment method), just not a pixel match. The logo is a
+// plain <img src> against the resolved public base URL (see
+// resolvePublicBaseUrl) - NOT a base64 data URI. That was tried first and
+// seemed like the obvious fix (no network dependency, works offline), but
+// major mail clients (Gmail, Outlook) strip inline data: URIs from
+// received HTML as an anti-spam measure regardless of validity, so it
+// never actually rendered for a real recipient. If no public base URL is
+// configured, the logo is omitted entirely rather than embedding a link
+// that's guaranteed unreachable.
 import type { Order } from "../../src/shared/types.js";
 
 function escHtml(s: string): string {
@@ -20,33 +23,7 @@ function escHtml(s: string): string {
 
 const rand = (n: number) => `R${n.toFixed(2)}`;
 
-const EXT_MIME: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml" };
-
-function readAsDataUri(filePath: string): string | null {
-  try {
-    const buf = fs.readFileSync(filePath);
-    const mime = EXT_MIME[path.extname(filePath).toLowerCase()] || "image/jpeg";
-    return `data:${mime};base64,${buf.toString("base64")}`;
-  } catch {
-    return null;
-  }
-}
-
-// Mirrors scripts/sync-branding.mjs's resolution: an admin-uploaded logo
-// lives at DATA_DIR/<settings.logoUrl>, falling back to the bundled
-// default at public/logo.jpg when none has been uploaded — and also
-// falling back there if the configured logoUrl points at a file that no
-// longer exists (e.g. after a restore from an older backup), rather than
-// silently sending no logo at all.
-function resolveLogoDataUri(logoUrl: string): string | null {
-  const bundledDefault = path.join(process.cwd(), "public/logo.jpg");
-  if (!logoUrl) return readAsDataUri(bundledDefault);
-  const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), "data");
-  const uploaded = readAsDataUri(path.join(dataDir, logoUrl.replace(/^\/+/, "")));
-  return uploaded ?? readAsDataUri(bundledDefault);
-}
-
-export function buildSimpleReceiptHtml(order: Order, settings: Record<string, string>): string {
+export function buildSimpleReceiptHtml(order: Order, settings: Record<string, string>, publicBaseUrl: string): string {
   const siteName = settings.siteName || "NemenchPos";
   const vatRegistered = settings.vatRegistered === "true";
   const subtotal = order.items.reduce((s, i) => s + (i.lineTotal ?? 0), 0);
@@ -65,11 +42,11 @@ export function buildSimpleReceiptHtml(order: Order, settings: Record<string, st
     ? `Paid: Cash - Tendered ${rand(order.cashTendered)}, Change ${rand(Math.max(0, order.cashTendered - total))}`
     : order.paymentMethod === "card" ? "Paid: Card" : "";
 
-  const logoDataUri = resolveLogoDataUri(settings.logoUrl || "");
+  const logoUrl = publicBaseUrl ? `${publicBaseUrl}${settings.logoUrl || "/logo.jpg"}` : "";
 
   return `
     <div style="font-family:Arial,Helvetica,sans-serif;max-width:420px;margin:0 auto;color:#1a1a2e;">
-      ${logoDataUri ? `<img src="${logoDataUri}" alt="${escHtml(siteName)}" style="width:56px;height:56px;border-radius:50%;object-fit:cover;margin-bottom:6px;">` : ""}
+      ${logoUrl ? `<img src="${logoUrl}" alt="${escHtml(siteName)}" style="width:56px;height:56px;border-radius:50%;object-fit:cover;margin-bottom:6px;">` : ""}
       <h2 style="color:#1a47a0;margin:0 0 2px;">${escHtml(siteName)}</h2>
       <p style="color:#666;margin:0 0 16px;font-size:13px;">Ticket #${escHtml(order.ticketNumber)}</p>
       <table style="width:100%;border-collapse:collapse;">
