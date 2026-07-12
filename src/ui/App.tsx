@@ -2983,6 +2983,26 @@ function CrmContactDetailPanel({ contactId, onClose, onChanged }: { contactId: s
 
 // ── Settings (admin) ──────────────────────────────────────────────────────────
 
+// Auto-fills the SMTP host/port for the email providers a small business
+// is most likely to already have an account with, so a non-technical admin
+// never has to go looking up a mail server address — they pick their
+// provider and fill in just their own email address + password.
+const EMAIL_PROVIDER_PRESETS: Record<string, { host: string; port: string; help: string }> = {
+  gmail: {
+    host: "smtp.gmail.com", port: "587",
+    help: "Use an App Password, not your normal Gmail password. Turn on 2-Step Verification in your Google Account, then create an App Password under Security → 2-Step Verification → App passwords, and paste that here."
+  },
+  outlook: {
+    host: "smtp.office365.com", port: "587",
+    help: "Use your normal Outlook/Office 365 email and password. If your organization enforces extra security, you may need an \"app password\" from your account's security settings instead."
+  },
+  yahoo: {
+    host: "smtp.mail.yahoo.com", port: "587",
+    help: "Yahoo requires an app password too: Account Info → Account Security → Generate app password."
+  },
+  custom: { host: "", port: "587", help: "Ask your email provider (or IT person) for their SMTP server address and port." }
+};
+
 // Admin control panel: printing config, branding (site name/logo/theme
 // color — also pushed live into buildReceiptHtml via setReceiptBranding so
 // printed receipts match immediately), product CSV import/export, and
@@ -3007,6 +3027,21 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
   const [emailOrderReadyBody, setEmailOrderReadyBody] = useState("");
   const [emailPaymentReceivedSubject, setEmailPaymentReceivedSubject] = useState("");
   const [emailPaymentReceivedBody, setEmailPaymentReceivedBody] = useState("");
+  // Email server (SMTP) connection details — the sensitive half of email
+  // setup. Configurable here in Settings (no SSH/env-var editing needed),
+  // but changing it requires PIN re-confirmation (see pendingEmailConfigSave)
+  // since it's effectively an email account's login credentials. The
+  // password itself is write-only: the server never sends the real value
+  // back (see server/routes/settings.ts), only whether one is set.
+  const [emailProvider, setEmailProvider] = useState("custom");
+  const [emailSmtpHost, setEmailSmtpHost] = useState("");
+  const [emailSmtpPort, setEmailSmtpPort] = useState("587");
+  const [emailSmtpUser, setEmailSmtpUser] = useState("");
+  const [emailSmtpPassInput, setEmailSmtpPassInput] = useState("");
+  const [emailSmtpPassSet, setEmailSmtpPassSet] = useState(false);
+  const [emailFromAddress, setEmailFromAddress] = useState("");
+  const [savingEmailConfig, setSavingEmailConfig] = useState(false);
+  const [pendingEmailConfigSave, setPendingEmailConfigSave] = useState(false);
   const [iconVariant, setIconVariant] = useState<IconVariant>("IconDefault");
   const [savingIcon, setSavingIcon] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
@@ -3057,6 +3092,16 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
       setEmailOrderReadyBody(s.emailOrderReadyBody ?? "");
       setEmailPaymentReceivedSubject(s.emailPaymentReceivedSubject ?? "");
       setEmailPaymentReceivedBody(s.emailPaymentReceivedBody ?? "");
+      setEmailSmtpHost(s.emailSmtpHost ?? "");
+      setEmailSmtpPort(s.emailSmtpPort || "587");
+      setEmailSmtpUser(s.emailSmtpUser ?? "");
+      setEmailSmtpPassSet(s.emailSmtpPassSet === "true");
+      setEmailFromAddress(s.emailFromAddress ?? "");
+      // Pre-select the matching provider preset on load, so returning to
+      // this screen doesn't just show "Other/custom" for a Gmail account
+      // that was already set up.
+      const matchedProvider = Object.entries(EMAIL_PROVIDER_PRESETS).find(([key, preset]) => key !== "custom" && preset.host === s.emailSmtpHost)?.[0];
+      setEmailProvider(matchedProvider ?? (s.emailSmtpHost ? "custom" : "gmail"));
     }).catch(() => undefined);
     api.stock.locations.list().then(setStockLocations).catch(() => undefined);
   }, []);
@@ -3104,6 +3149,39 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
 
   const saveEmailTemplate = async (key: string, value: string) => {
     await api.settings.set({ [key]: value });
+  };
+
+  const applyEmailProvider = (provider: string) => {
+    setEmailProvider(provider);
+    const preset = EMAIL_PROVIDER_PRESETS[provider];
+    if (preset && provider !== "custom") { setEmailSmtpHost(preset.host); setEmailSmtpPort(preset.port); }
+  };
+
+  // The actual write, run only after the PIN modal below confirms — never
+  // called directly from a form control. Leaving the password field blank
+  // keeps whatever's already saved (it's never sent back down to compare
+  // against, so "unchanged" has to mean "don't overwrite").
+  const confirmSaveEmailConfig = async () => {
+    setSavingEmailConfig(true); setMsg("");
+    try {
+      const updates: Record<string, string> = {
+        emailSmtpHost: emailSmtpHost.trim(),
+        emailSmtpPort: emailSmtpPort.trim() || "587",
+        emailSmtpUser: emailSmtpUser.trim(),
+        emailFromAddress: emailFromAddress.trim()
+      };
+      if (emailSmtpPassInput.trim()) updates.emailSmtpPass = emailSmtpPassInput.trim();
+      await api.settings.set(updates);
+      if (emailSmtpPassInput.trim()) setEmailSmtpPassSet(true);
+      setEmailSmtpPassInput("");
+      setMsg("Email server settings saved.");
+      window.setTimeout(() => setMsg(""), 3000);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : "Failed to save email settings");
+    } finally {
+      setSavingEmailConfig(false);
+      setPendingEmailConfigSave(false);
+    }
   };
 
   const saveSiteName = async (name: string) => {
@@ -3452,10 +3530,52 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
 
       <section className="settings-section">
         <h3>Email notifications</h3>
+        <p className="settings-hint">Sends an email automatically when a customer gives an email address at checkout (POS or New Order) and their order becomes Ready, or (POS only) when payment is taken — completely independent of the WhatsApp/CRM system above. Two things are needed: an email account to send from (below), and this switched on.</p>
+
         <div className="setting-row">
           <div className="setting-info">
-            <strong>Send order-ready / payment emails</strong>
-            <p>Sent automatically when a customer gives an email at checkout (POS or New Order) — independent of the WhatsApp/CRM system. Requires SMTP to be configured on the server (EMAIL_SMTP_* environment variables, including the "from" address) — see the README; without it, nothing is sent.</p>
+            <strong>1. Connect an email account</strong>
+            <p>Pick the provider your business email is with. This fills in the technical server details for you — you only need to type in your own email address and its password.</p>
+          </div>
+          <select className="settings-select" value={emailProvider} onChange={(e) => applyEmailProvider(e.target.value)}>
+            <option value="gmail">Gmail</option>
+            <option value="outlook">Outlook / Office 365</option>
+            <option value="yahoo">Yahoo Mail</option>
+            <option value="custom">Other / custom</option>
+          </select>
+        </div>
+        <p className="settings-hint">{EMAIL_PROVIDER_PRESETS[emailProvider].help}</p>
+
+        <div className="setting-row">
+          <div className="setting-info"><strong>Email address</strong><p>The account you're sending from — also used as the "from" address customers see.</p></div>
+          <input type="email" value={emailSmtpUser} onChange={(e) => { setEmailSmtpUser(e.target.value); setEmailFromAddress(e.target.value); }} placeholder="e.g. orders@yourbusiness.com" />
+        </div>
+        <div className="setting-row">
+          <div className="setting-info"><strong>Password</strong><p>{emailSmtpPassSet ? "A password is already saved — leave this blank to keep it, or type a new one to replace it." : "See the note above the provider box if your provider needs an \"app password\" instead of your normal one."}</p></div>
+          <input type="password" value={emailSmtpPassInput} onChange={(e) => setEmailSmtpPassInput(e.target.value)} placeholder={emailSmtpPassSet ? "Leave blank to keep current password" : "Password or app password"} />
+        </div>
+        {emailProvider === "custom" && (
+          <>
+            <div className="setting-row">
+              <div className="setting-info"><strong>Server address</strong></div>
+              <input value={emailSmtpHost} onChange={(e) => setEmailSmtpHost(e.target.value)} placeholder="e.g. smtp.yourprovider.com" />
+            </div>
+            <div className="setting-row">
+              <div className="setting-info"><strong>Port</strong></div>
+              <input value={emailSmtpPort} onChange={(e) => setEmailSmtpPort(e.target.value)} placeholder="587" />
+            </div>
+          </>
+        )}
+        <footer className="actions">
+          <button type="button" disabled={savingEmailConfig || !emailSmtpHost.trim() || !emailSmtpUser.trim()} onClick={() => setPendingEmailConfigSave(true)}>
+            {savingEmailConfig ? "Saving…" : "Save email account (PIN required)"}
+          </button>
+        </footer>
+
+        <div className="setting-row">
+          <div className="setting-info">
+            <strong>2. Turn notifications on</strong>
+            <p>Only takes effect once an email account is saved above.</p>
           </div>
           <label className="checkbox-label">
             <input type="checkbox" checked={emailNotificationsEnabled} onChange={(e) => void saveEmailNotificationsEnabled(e.target.checked)} />
@@ -3488,6 +3608,15 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
                 placeholder="Hi {{customerName}}, we've received your payment of {{amount}} for order #{{ticketNumber}}. Thank you!" />
             </div>
           </>
+        )}
+        {pendingEmailConfigSave && (
+          <PinConfirmModal
+            title="Save email account?"
+            message="Enter your PIN to save these email server settings — they control which account order notifications are sent from."
+            confirmLabel="Save settings"
+            onConfirm={() => void confirmSaveEmailConfig()}
+            onCancel={() => setPendingEmailConfigSave(false)}
+          />
         )}
       </section>
 

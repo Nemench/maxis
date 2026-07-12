@@ -30,8 +30,18 @@ router.get("/public", (_req, res) => {
   });
 });
 
+// This endpoint is requireAuth only (not requireAdmin — every logged-in
+// role reads settings for things like receipt branding), so the SMTP
+// password must never be included in its response even to an admin caller
+// — swapped for a boolean so the UI can show "configured ✓" without ever
+// re-displaying the real secret (same write-only pattern as the
+// control-plane API key display). The real value is only ever written via
+// PUT / below, which is requireAdmin.
 router.get("/", requireAuth, (_req, res) => {
-  res.json(db.getAllSettings());
+  const s = db.getAllSettings();
+  const hasPassword = !!s.emailSmtpPass;
+  delete s.emailSmtpPass;
+  res.json({ ...s, emailSmtpPassSet: String(hasPassword) });
 });
 
 // Admin-only — license/suspension status is informational for the business
