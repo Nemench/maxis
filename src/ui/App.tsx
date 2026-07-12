@@ -358,6 +358,31 @@ function showToast(text: string, tone: "info" | "error" = "info") {
   globalToast?.(text, tone);
 }
 
+// Print-behavior preferences — same module-level-cache reasoning as
+// receiptBranding above: printReceipt/printTestPage are plain functions
+// called from many places outside the component tree (TicketCard,
+// HistoryView, Queue, Settings, PrintLabelsPanel), and unlike
+// printStyle/printerName (which vary per call site — different printer
+// per department — so callers already resolve and pass those explicitly),
+// these two are uniform, global preferences that apply the same way to
+// every print action, which is exactly what this cache is for.
+let printPrefs = { forcePreview: false, colorMode: "color" as "color" | "grayscale" };
+function setPrintPrefs(patch: Partial<typeof printPrefs>) {
+  printPrefs = { ...printPrefs, ...patch };
+}
+
+// Injects a grayscale filter into a generated receipt/label/label-sheet
+// document's own <style> block when the admin has selected black-and-white
+// printing — a single point of enforcement that every print path (the
+// browser print-preview dialog AND the server-side headless-Chrome PDF
+// route, see server/routes/print.ts) both honor automatically, since both
+// are real rendering engines applying the exact same CSS rather than two
+// separate mechanisms that could drift.
+function applyColorMode(html: string): string {
+  if (printPrefs.colorMode !== "grayscale") return html;
+  return html.replace("</style>", "body{filter:grayscale(100%)}</style>");
+}
+
 // ── Main app ──────────────────────────────────────────────────────────────────
 
 // The logged-in shell: sidebar nav (gated per role) + whichever panel the
@@ -401,6 +426,7 @@ function MainApp({ currentUser, onLogout, branding, onBrandingChange, themeMode,
       setAutoPrint(s.autoPrint === "true");
       setPrintStyle(s.printStyle ?? "thermal");
       setPrinterMap({ kitchen: s.kitchenPrinter ?? "", counter: s.counterPrinter ?? "", master: s.masterPrinter ?? "" });
+      setPrintPrefs({ forcePreview: s.printForcePreview === "true", colorMode: s.printColorMode === "grayscale" ? "grayscale" : "color" });
     }).catch(() => undefined);
   }, []);
 
@@ -2061,7 +2087,7 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
       const html = format.type === "thermal"
         ? buildThermalPrintHtml(data, format, quantity)
         : buildA4SheetHtml(data, format, quantity, startPosition);
-      printHtml(html);
+      printHtml(applyColorMode(html));
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Could not build the label print job.");
     } finally {
@@ -3831,6 +3857,11 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
   const [emailSmtpPassSet, setEmailSmtpPassSet] = useState(false);
   const [emailFromAddress, setEmailFromAddress] = useState("");
   const [publicBaseUrl, setPublicBaseUrl] = useState("");
+  // Distinct from autoPrint (a prop, above) — that controls whether a NEW
+  // order triggers printing automatically at all; this controls what a
+  // MANUAL print button click does once triggered.
+  const [forcePreview, setForcePreview] = useState(false);
+  const [colorMode, setColorMode] = useState<"color" | "grayscale">("color");
   const [savingEmailConfig, setSavingEmailConfig] = useState(false);
   const [pendingEmailConfigSave, setPendingEmailConfigSave] = useState(false);
   const [testEmailTo, setTestEmailTo] = useState("");
@@ -3892,6 +3923,8 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
       setEmailSmtpPassSet(s.emailSmtpPassSet === "true");
       setEmailFromAddress(s.emailFromAddress ?? "");
       setPublicBaseUrl(s.publicBaseUrl ?? "");
+      setForcePreview(s.printForcePreview === "true");
+      setColorMode(s.printColorMode === "grayscale" ? "grayscale" : "color");
       // Pre-select the matching provider preset on load, so returning to
       // this screen doesn't just show "Other/custom" for a Gmail account
       // that was already set up.
@@ -4053,6 +4086,23 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
     window.setTimeout(() => setMsg(""), 2500);
   };
 
+  const toggleForcePreview = async () => {
+    const next = !forcePreview;
+    setForcePreview(next);
+    await api.settings.set({ printForcePreview: String(next) });
+    setPrintPrefs({ forcePreview: next });
+    setMsg(next ? "Manual print now always shows a preview first" : "Manual print now sends straight to the assigned printer");
+    window.setTimeout(() => setMsg(""), 2500);
+  };
+
+  const changeColorMode = async (mode: "color" | "grayscale") => {
+    setColorMode(mode);
+    await api.settings.set({ printColorMode: mode });
+    setPrintPrefs({ colorMode: mode });
+    setMsg("Print color mode updated");
+    window.setTimeout(() => setMsg(""), 2500);
+  };
+
   const changePrinter = async (key: string, value: string) => {
     await api.settings.set({ [key]: value });
     onPrinterMapChange({ ...printerMap, [key.replace("Printer", "")]: value } as { kitchen: string; counter: string; master: string });
@@ -4142,6 +4192,25 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
             <option value="a4">All — A4</option>
             <option value="master_a4">Master A4 · dept thermal</option>
             <option value="dept_a4">Master thermal · dept A4</option>
+          </select>
+        </div>
+        <div className="setting-row">
+          <div className="setting-info">
+            <strong>Force print preview</strong>
+            <p>When someone clicks a manual Print button, always open the print preview dialog instead of sending straight to the assigned printer. Doesn't affect auto-print on order creation, above.</p>
+          </div>
+          <button type="button" className={forcePreview ? "toggle-on" : "toggle-off"} onClick={() => void toggleForcePreview()}>
+            {forcePreview ? "On" : "Off"}
+          </button>
+        </div>
+        <div className="setting-row">
+          <div className="setting-info">
+            <strong>Print color</strong>
+            <p>Applies to both receipts and labels, whether printed silently or via preview.</p>
+          </div>
+          <select className="settings-select" value={colorMode} onChange={(e) => void changeColorMode(e.target.value as "color" | "grayscale")}>
+            <option value="color">Color</option>
+            <option value="grayscale">Black &amp; white</option>
           </select>
         </div>
       </section>
@@ -5802,9 +5871,14 @@ async function printReceipt(order: Order, type: "kitchen" | "counter" | "master"
 
   await ensureLogoDataUri();
   const resolved = resolvePrintStyle(type, printStyle);
-  const html = buildReceiptHtml(order, type, resolved);
+  const html = applyColorMode(buildReceiptHtml(order, type, resolved));
 
-  if (printerName) {
+  // Distinct from the "Auto-print" setting (which controls whether a
+  // NEW order triggers printing automatically at all) — this is about
+  // what a MANUAL print action does once triggered: silently send
+  // straight to the assigned printer (default), or always show a
+  // preview/print dialog first, even when a printer is configured.
+  if (printerName && !printPrefs.forcePreview) {
     try { await api.print(printerName, html); return; }
     catch (err) {
       // Falls back to the browser print dialog so the ticket still gets
@@ -5894,10 +5968,11 @@ hr{border:none;border-top:1px dashed #999;margin:12px 0}
 <div>If you can read this,</div>
 <div>the printer is working.</div>
 </body></html>`;
+  const printable = applyColorMode(html);
 
-  if (printerName) {
+  if (printerName && !printPrefs.forcePreview) {
     try {
-      await api.print(printerName, html);
+      await api.print(printerName, printable);
       showToast(`Test page sent to "${printerName}".`, "info");
       return;
     } catch (err) {
@@ -5910,7 +5985,7 @@ hr{border:none;border-top:1px dashed #999;margin:12px 0}
       return;
     }
   }
-  printHtml(html);
+  printHtml(printable);
 }
 
 // ── Urgency helpers ───────────────────────────────────────────────────────────
