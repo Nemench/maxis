@@ -242,6 +242,11 @@ export interface OrderItem extends OrderItemInput {
   // never silently rewrites a past sale's margin. Null for free-text lines
   // (no productId) or sales made before this feature existed.
   costAtSale: number | null;
+  // Order Consolidation feature (see server/database.ts's
+  // scanConsolidationItem): set the moment this line's barcode is
+  // scanned and matched during the checklist step. Null until scanned;
+  // frozen once the parent order's consolidatedAt is set.
+  scannedAt: string | null;
 }
 
 export interface DeliveryAddress {
@@ -306,6 +311,17 @@ export interface Order {
   cashTendered: number | null;
   crmContactId: string | null;
   customerEmail: string | null;
+  // Set only for a completeImmediately (POS) sale, at creation time — the
+  // one point "paid" is an actually-known fact today. Null for a regular
+  // KOT ticket even after it's fulfilled (status: "Done" there means
+  // "handed over", not "paid") until a real "mark as paid" action exists.
+  paidAt: string | null;
+  // Order Consolidation feature: both set together, once, only after
+  // every line item has been individually scanned and verified against
+  // this order (see server/database.ts's finalizeConsolidation) — a
+  // final packing/QA step, distinct from `status`. Null until then.
+  consolidatedAt: string | null;
+  consolidationBarcode: string | null;
   items: OrderItem[];
 }
 
@@ -464,6 +480,16 @@ export interface EmailOutboxItem {
 // KotDatabase.upsertEmailSubscriber) so admins have a ready-made mailing
 // list for news/deals campaigns without re-typing it by hand. Independent
 // of EmailOutboxItem (order receipts) and CrmContact (phone/WhatsApp).
+// Editable freeform body for one of the 4 pickup/delivery x paid/unpaid
+// order-notification combinations (see server/whatsapp/orderMessages.ts).
+export interface OrderMessageTemplate {
+  id: string;
+  fulfillmentType: "pickup" | "delivery";
+  paymentStatus: "paid" | "unpaid";
+  body: string;
+  updatedAt: string;
+}
+
 export interface EmailSubscriber {
   id: string;
   name: string | null;

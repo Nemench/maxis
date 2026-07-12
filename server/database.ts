@@ -17,9 +17,11 @@ import type {
   StockLocation, ProductStockRow, ItemSalesStat, ItemStockMovementStat, StatisticsOverview,
   MarginStat, MarginOverview, YieldEstimate, YieldEstimateInput, PendingYieldConversion, PendingYieldItem,
   CrmContact, CrmContactInput, CrmMessage, MessageDirection, MessageType, MessageStatus,
-  WhatsappOutboxItem, CrmAutomationRule, ConsentStatus, CrmContactDetail, CrmTag, EmailOutboxItem, EmailSubscriber
+  WhatsappOutboxItem, CrmAutomationRule, ConsentStatus, CrmContactDetail, CrmTag, EmailOutboxItem, EmailSubscriber, OrderMessageTemplate
 } from "../src/shared/types.js";
 import { generateInternalBarcode } from "../src/shared/internalBarcode.js";
+import { generateConsolidationBarcode } from "../src/shared/orderConsolidationBarcode.js";
+import { parseWeighBarcode } from "../src/shared/weighBarcode.js";
 import { weightedMarginPct } from "../src/shared/margin.js";
 
 export class KotDatabase {
@@ -706,7 +708,7 @@ export class KotDatabase {
     "products", "crm_contact_tags", "crm_messages", "whatsapp_outbox", "crm_automation_rules",
     "orders", "order_items", "weigh_in_batches", "weigh_in_lines",
     "product_cost_history", "product_yield_estimates", "pending_yield_conversions", "pending_yield_items",
-    "product_stock", "email_outbox", "email_subscribers"
+    "product_stock", "email_outbox", "email_subscribers", "order_message_templates"
   ];
 
   private tableColumns(table: string): string[] {
@@ -830,9 +832,15 @@ export class KotDatabase {
     // there's no match), so this never fails a sale over a typo'd number.
     const crmContactId = input.customerNumber?.trim() ? this.resolveOrCreateContactByPhone(input.customerNumber.trim()).id : null;
 
+    // Set only for a completeImmediately (POS) sale — the one point
+    // "paid" is an actually-known fact today (see the paidAt column
+    // comment in migrate()). A regular KOT ticket stays null here forever
+    // until a real "mark as paid" staff action exists.
+    const paidAt = doneNow ? now : null;
+
     const result = this.db
-      .prepare("INSERT INTO orders (ticketNumber, customerName, customerPhone, orderType, deliveryAddress, requestedTime, assignedTo, status, kitchenStatus, counterStatus, requestedById, createdAt, updatedAt, discountAmount, paymentMethod, cashTendered, crmContactId, customerEmail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(ticketNumber, input.customerName.trim(), input.customerPhone.trim(), input.orderType, input.orderType === "delivery" || input.deliveryAddress?.street ? JSON.stringify(input.deliveryAddress) : "{}", input.requestedTime.trim(), input.assignedTo?.trim() || null, overallStatus, kitchenStatus, counterStatus, requestedById, now, now, discountAmount, paymentMethod, cashTendered, crmContactId, input.customerEmail?.trim() || null);
+      .prepare("INSERT INTO orders (ticketNumber, customerName, customerPhone, orderType, deliveryAddress, requestedTime, assignedTo, status, kitchenStatus, counterStatus, requestedById, createdAt, updatedAt, discountAmount, paymentMethod, cashTendered, crmContactId, customerEmail, paidAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(ticketNumber, input.customerName.trim(), input.customerPhone.trim(), input.orderType, input.orderType === "delivery" || input.deliveryAddress?.street ? JSON.stringify(input.deliveryAddress) : "{}", input.requestedTime.trim(), input.assignedTo?.trim() || null, overallStatus, kitchenStatus, counterStatus, requestedById, now, now, discountAmount, paymentMethod, cashTendered, crmContactId, input.customerEmail?.trim() || null, paidAt);
 
     const orderId = Number(result.lastInsertRowid);
     const insertItem = this.db.prepare(
@@ -893,10 +901,10 @@ export class KotDatabase {
     const base = `
       SELECT o.id, o.ticketNumber, o.customerName, o.customerPhone, o.orderType,
              o.deliveryAddress, o.requestedTime, o.assignedTo, o.status, o.kitchenStatus, o.counterStatus,
-             o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, o.paymentMethod, o.cashTendered, o.crmContactId, o.customerEmail, u.name as requestedByName,
+             o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, o.paymentMethod, o.cashTendered, o.crmContactId, o.customerEmail, o.paidAt, o.consolidatedAt, o.consolidationBarcode, u.name as requestedByName,
              oi.id as oi_id, oi.productId as oi_productId, oi.name as oi_name,
              oi.kg as oi_kg, oi.quantity as oi_quantity, oi.notes as oi_notes,
-             oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept, oi.costAtSale as oi_costAtSale
+             oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept, oi.costAtSale as oi_costAtSale, oi.scannedAt as oi_scannedAt
       FROM orders o
       LEFT JOIN users u ON o.requestedById = u.id
       LEFT JOIN order_items oi ON o.id = oi.orderId`;
@@ -929,10 +937,10 @@ export class KotDatabase {
     const sql = `
       SELECT o.id, o.ticketNumber, o.customerName, o.customerPhone, o.orderType,
              o.deliveryAddress, o.requestedTime, o.assignedTo, o.status, o.kitchenStatus, o.counterStatus,
-             o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, o.paymentMethod, o.cashTendered, o.crmContactId, o.customerEmail, u.name as requestedByName,
+             o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, o.paymentMethod, o.cashTendered, o.crmContactId, o.customerEmail, o.paidAt, o.consolidatedAt, o.consolidationBarcode, u.name as requestedByName,
              oi.id as oi_id, oi.productId as oi_productId, oi.name as oi_name,
              oi.kg as oi_kg, oi.quantity as oi_quantity, oi.notes as oi_notes,
-             oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept, oi.costAtSale as oi_costAtSale
+             oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept, oi.costAtSale as oi_costAtSale, oi.scannedAt as oi_scannedAt
       FROM orders o
       LEFT JOIN users u ON o.requestedById = u.id
       LEFT JOIN order_items oi ON o.id = oi.orderId
@@ -1152,9 +1160,92 @@ export class KotDatabase {
     return { ...this.parseOrder(order), items: this.listOrderItems(id) };
   }
 
+  // Backs the printed order barcode's scan targets (see buildReceiptHtml's
+  // ticketBarcodeSvg comment): Queue/History's "Scan order" button and
+  // POS's "Scan to reorder" both decode a CODE128 barcode back to this
+  // exact ticketNumber string, then look the order up here. ticketNumber
+  // is UNIQUE (see the orders table schema), so this is always at most one row.
+  getOrderByTicket(ticketNumber: string): Order | null {
+    const order = this.db
+      .prepare("SELECT o.*, u.name as requestedByName FROM orders o LEFT JOIN users u ON o.requestedById = u.id WHERE o.ticketNumber = ?")
+      .get(ticketNumber) as Order | null;
+    if (!order) return null;
+    return { ...this.parseOrder(order), items: this.listOrderItems(order.id) };
+  }
+
   updateOrderStatus(id: number, status: OrderStatus): Order {
     this.db.prepare("UPDATE orders SET status = ?, updatedAt = ? WHERE id = ?").run(status, new Date().toISOString(), id);
     return this.getOrder(id);
+  }
+
+  // ── Order Consolidation ──────────────────────────────────────────────────
+  // Final packing/QA step: staff scans every line item's barcode to verify
+  // it against the order, then a single consolidation barcode + receipt is
+  // generated. Only 'Ready' (prepared, not yet handed over), not-yet-
+  // consolidated orders are eligible — see the consolidatedAt column
+  // comment in migrate().
+
+  listOrdersPendingConsolidation(): Order[] {
+    const sql = `
+      SELECT o.id, o.ticketNumber, o.customerName, o.customerPhone, o.orderType,
+             o.deliveryAddress, o.requestedTime, o.assignedTo, o.status, o.kitchenStatus, o.counterStatus,
+             o.requestedById, o.createdAt, o.updatedAt, o.discountAmount, o.paymentMethod, o.cashTendered, o.crmContactId, o.customerEmail, o.paidAt, o.consolidatedAt, o.consolidationBarcode, u.name as requestedByName,
+             oi.id as oi_id, oi.productId as oi_productId, oi.name as oi_name,
+             oi.kg as oi_kg, oi.quantity as oi_quantity, oi.notes as oi_notes,
+             oi.unitPrice as oi_unitPrice, oi.lineTotal as oi_lineTotal, oi.wantedPrice as oi_wantedPrice, oi.department as oi_dept, oi.costAtSale as oi_costAtSale, oi.scannedAt as oi_scannedAt
+      FROM orders o
+      LEFT JOIN users u ON o.requestedById = u.id
+      LEFT JOIN order_items oi ON o.id = oi.orderId
+      WHERE o.status = 'Ready' AND o.consolidatedAt IS NULL
+      ORDER BY o.updatedAt ASC`;
+    return Array.from(this.buildOrderMap(this.db.prepare(sql).all() as Record<string, unknown>[]).values());
+  }
+
+  // Resolves a scanned code to a product exactly like the existing
+  // scan-to-add-to-order flow does (BarcodeAddModal/resolveBarcode in
+  // src/ui/App.tsx): a scale weigh-label's PLU, or any other barcode
+  // (real manufacturer, or this app's own "29"-prefixed auto-generated
+  // one) matched as-is. Matches it against an UNSCANNED line on this
+  // specific order — never silently ignored: a code that matches no line
+  // at all, or matches one that's already checked off, both throw a
+  // distinct, specific error rather than a generic failure.
+  scanConsolidationItem(orderId: number, rawCode: string): OrderItem {
+    const order = this.getOrder(orderId);
+    if (order.consolidatedAt) throw new Error("This order has already been consolidated — no more scanning needed");
+
+    const weigh = parseWeighBarcode(rawCode);
+    const product = this.getProductByBarcode(weigh ? weigh.plu : rawCode);
+    if (!product) throw new Error(`No product found for barcode "${rawCode}"`);
+
+    const match = order.items.find((i) => i.productId === product.id && !i.scannedAt);
+    if (!match) {
+      const alreadyScanned = order.items.some((i) => i.productId === product.id && i.scannedAt);
+      throw new Error(alreadyScanned ? `"${product.name}" has already been scanned for this order` : `"${product.name}" is not on this order`);
+    }
+
+    const now = new Date().toISOString();
+    this.db.prepare("UPDATE order_items SET scannedAt = ? WHERE id = ?").run(now, match.id);
+    return { ...match, scannedAt: now };
+  }
+
+  // Free-text lines (no productId) have no barcode that could ever be
+  // scanned — same "nothing to check against, always allowed" treatment
+  // the cost-price enforcement in routes/products.ts already gives them —
+  // so they're excluded from what "every item scanned" requires here.
+  finalizeConsolidation(orderId: number): Order {
+    const order = this.getOrder(orderId);
+    if (order.consolidatedAt) throw new Error("This order has already been consolidated");
+
+    const scannable = order.items.filter((i) => i.productId != null);
+    const unscanned = scannable.filter((i) => !i.scannedAt);
+    if (unscanned.length > 0) {
+      throw new Error(`${unscanned.length} of ${scannable.length} items still need to be scanned`);
+    }
+
+    const now = new Date().toISOString();
+    const barcode = generateConsolidationBarcode(orderId);
+    this.db.prepare("UPDATE orders SET consolidatedAt = ?, consolidationBarcode = ? WHERE id = ?").run(now, barcode, orderId);
+    return this.getOrder(orderId);
   }
 
   // Appends one item to an already-created order — used by the "Scan
@@ -1230,6 +1321,7 @@ export class KotDatabase {
           wantedPrice: row.oi_wantedPrice as number | null,
           department: row.oi_dept as Department,
           costAtSale: row.oi_costAtSale as number | null,
+          scannedAt: row.oi_scannedAt as string | null,
         });
       }
     }
@@ -1244,7 +1336,7 @@ export class KotDatabase {
 
   private listOrderItems(orderId: number): OrderItem[] {
     return this.db
-      .prepare("SELECT id, orderId, productId, name, kg, quantity, notes, unitPrice, lineTotal, wantedPrice, department, costAtSale FROM order_items WHERE orderId = ? ORDER BY id ASC")
+      .prepare("SELECT id, orderId, productId, name, kg, quantity, notes, unitPrice, lineTotal, wantedPrice, department, costAtSale, scannedAt FROM order_items WHERE orderId = ? ORDER BY id ASC")
       .all(orderId) as OrderItem[];
   }
 
@@ -1302,6 +1394,20 @@ export class KotDatabase {
       if (!cols.includes("cashTendered")) this.db.exec("ALTER TABLE orders ADD COLUMN cashTendered REAL");
       if (!cols.includes("crmContactId")) this.db.exec("ALTER TABLE orders ADD COLUMN crmContactId TEXT REFERENCES crm_contacts(id)");
       if (!cols.includes("customerEmail")) this.db.exec("ALTER TABLE orders ADD COLUMN customerEmail TEXT");
+      // Real, permanent "was this order actually paid" signal — set once,
+      // at creation, only for a completeImmediately (POS) sale (see
+      // createOrder below). Deliberately NOT derived from status/deptStatus:
+      // a normal KOT ticket also ends up status='Done' once fulfilled,
+      // which would otherwise be indistinguishable from a paid POS sale.
+      // Stays null forever for a regular ticket until a real "mark as
+      // paid" action exists — see buildOrderMessage's payment_status gap.
+      if (!cols.includes("paidAt")) this.db.exec("ALTER TABLE orders ADD COLUMN paidAt TEXT");
+      // Order Consolidation feature (see finalizeConsolidation): set
+      // together, once, only after every line item has been individually
+      // scanned and verified — a final packing/QA step, not a general
+      // order-completion flag (see orders.status for that).
+      if (!cols.includes("consolidatedAt")) this.db.exec("ALTER TABLE orders ADD COLUMN consolidatedAt TEXT");
+      if (!cols.includes("consolidationBarcode")) this.db.exec("ALTER TABLE orders ADD COLUMN consolidationBarcode TEXT");
     }
 
     // Add html_body to email_outbox if missing (existing databases created
@@ -1350,6 +1456,11 @@ export class KotDatabase {
       const oiCols = (this.db.prepare("PRAGMA table_info(order_items)").all() as { name: string }[]).map((c) => c.name);
       if (!oiCols.includes("wantedPrice")) this.db.exec("ALTER TABLE order_items ADD COLUMN wantedPrice REAL");
       if (!oiCols.includes("costAtSale")) this.db.exec("ALTER TABLE order_items ADD COLUMN costAtSale REAL");
+      // Per-line checklist state for Order Consolidation's scan step (see
+      // scanConsolidationItem) — lives on the row itself, not a separate
+      // table, so it survives staff navigating away mid-scan and coming
+      // back. Frozen once the parent order's consolidatedAt is set.
+      if (!oiCols.includes("scannedAt")) this.db.exec("ALTER TABLE order_items ADD COLUMN scannedAt TEXT");
     }
 
     // Needed before the CREATE TABLE below runs (which would otherwise make
@@ -1410,7 +1521,10 @@ export class KotDatabase {
         paymentMethod TEXT NOT NULL DEFAULT 'cash',
         cashTendered REAL,
         crmContactId TEXT REFERENCES crm_contacts(id),
-        customerEmail TEXT
+        customerEmail TEXT,
+        paidAt TEXT,
+        consolidatedAt TEXT,
+        consolidationBarcode TEXT
       );
 
       CREATE TABLE IF NOT EXISTS order_items (
@@ -1425,7 +1539,8 @@ export class KotDatabase {
         lineTotal REAL,
         wantedPrice REAL,
         department TEXT NOT NULL DEFAULT 'counter',
-        costAtSale REAL
+        costAtSale REAL,
+        scannedAt TEXT
       );
 
       -- ── CRM + WhatsApp automation ──────────────────────────────────────────
@@ -1534,12 +1649,33 @@ export class KotDatabase {
         updated_at TEXT NOT NULL
       );
 
+      -- ── Order-notification message templates ────────────────────────────
+      -- Editable freeform bodies for the 4 pickup/delivery x paid/unpaid
+      -- combinations (see server/whatsapp/orderMessages.ts's
+      -- buildOrderMessage). NOT the same thing as the Meta-approved
+      -- WhatsApp template catalog in whatsapp_templates (business profile)
+      -- / crm_automation_rules — these are only legal to send as a
+      -- freeform WhatsApp message within the 24h service window (Meta
+      -- rejects business-initiated freeform sends outside it); outside the
+      -- window, triggerOrderReadyMessage falls back to the existing
+      -- Meta-approved order_ready template instead. Editable here anytime
+      -- with no Meta resubmission needed — that's the tradeoff for only
+      -- being usable in-window.
+      CREATE TABLE IF NOT EXISTS order_message_templates (
+        id TEXT PRIMARY KEY,
+        fulfillment_type TEXT NOT NULL,
+        payment_status TEXT NOT NULL,
+        body TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_crm_contacts_phone ON crm_contacts(phone_number);
       CREATE INDEX IF NOT EXISTS idx_crm_messages_contact ON crm_messages(contact_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_email_outbox_status ON email_outbox(status);
       CREATE INDEX IF NOT EXISTS idx_whatsapp_outbox_status ON whatsapp_outbox(status);
       CREATE INDEX IF NOT EXISTS idx_orders_crm_contact ON orders(crmContactId);
       CREATE INDEX IF NOT EXISTS idx_email_subscribers_status ON email_subscribers(status);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_order_msg_tpl_combo ON order_message_templates(fulfillment_type, payment_status);
 
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
@@ -1713,6 +1849,35 @@ export class KotDatabase {
     this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('vatRegistered', 'false')").run();
     this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('vatNumber', '')").run();
     this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('businessAddress', '')").run();
+    // {closing_time} placeholder source for order_message_templates below —
+    // a business-wide fact, not per-order, so it lives here rather than on
+    // the order. Blank by default; buildOrderMessage falls back to a
+    // generic phrase if it's never set.
+    this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('closingTime', '')").run();
+
+    // Seed default order-notification message templates (see the
+    // order_message_templates schema comment above) — INSERT OR IGNORE
+    // against the unique (fulfillment_type, payment_status) index, same
+    // idempotent-on-every-boot pattern as the settings defaults just
+    // above, so this backfills existing installs upgrading into this
+    // feature (unlike seed(), which only ever runs once, on a database
+    // with zero users) without ever overwriting an admin's own edits.
+    const seedOrderMessageTemplate = this.db.prepare(
+      "INSERT OR IGNORE INTO order_message_templates (id, fulfillment_type, payment_status, body, updated_at) VALUES (?, ?, ?, ?, ?)"
+    );
+    const nowIso = new Date().toISOString();
+    for (const [id, fulfillmentType, paymentStatus, body] of [
+      ["pickup_ready_paid", "pickup", "paid",
+        "Hi {customer_name}, your order at {business_name} is ready for collection.\n\nOrder #{order_number}\nTotal: R{amount} - Paid ✅\n\n📍 {business_address}\n🕐 Collect anytime before {closing_time}\n\nThanks for your order!"],
+      ["pickup_ready_unpaid", "pickup", "unpaid",
+        "Hi {customer_name}, your order at {business_name} is ready for collection.\n\nOrder #{order_number}\nTotal due: R{amount} - Pay on collection\n\n📍 {business_address}\n🕐 Collect anytime before {closing_time}\n\nSee you soon!"],
+      ["delivery_out_paid", "delivery", "paid",
+        "Hi {customer_name}, your order from {business_name} is on its way!\n\nOrder #{order_number}\nTotal: R{amount} - Paid ✅\n\n🚚 Estimated arrival: {eta}\n📍 Delivering to: {delivery_address}\n\nThanks for your order!"],
+      ["delivery_out_unpaid", "delivery", "unpaid",
+        "Hi {customer_name}, your order from {business_name} is on its way!\n\nOrder #{order_number}\nTotal due: R{amount} - Pay on delivery\n\n🚚 Estimated arrival: {eta}\n📍 Delivering to: {delivery_address}\n\nHave your payment ready for the driver."]
+    ]) {
+      seedOrderMessageTemplate.run(id, fulfillmentType, paymentStatus, body, nowIso);
+    }
   }
 
   // ── Settings ───────────────────────────────────────────────────────────────
@@ -2127,6 +2292,38 @@ export class KotDatabase {
     return this.db
       .prepare("SELECT id, name, email, status, source, created_at as createdAt, updated_at as updatedAt FROM email_subscribers WHERE status = 'subscribed'")
       .all() as EmailSubscriber[];
+  }
+
+  // ── Order-notification message templates ─────────────────────────────────
+  // See the order_message_templates schema comment (migrate()) for what
+  // these are and their Meta-window constraint.
+
+  getOrderMessageTemplate(fulfillmentType: "pickup" | "delivery", paymentStatus: "paid" | "unpaid"): OrderMessageTemplate | null {
+    const row = this.db
+      .prepare("SELECT id, fulfillment_type as fulfillmentType, payment_status as paymentStatus, body, updated_at as updatedAt FROM order_message_templates WHERE fulfillment_type = ? AND payment_status = ?")
+      .get(fulfillmentType, paymentStatus) as OrderMessageTemplate | undefined;
+    return row ?? null;
+  }
+
+  listOrderMessageTemplates(): OrderMessageTemplate[] {
+    return this.db
+      .prepare("SELECT id, fulfillment_type as fulfillmentType, payment_status as paymentStatus, body, updated_at as updatedAt FROM order_message_templates ORDER BY fulfillment_type, payment_status")
+      .all() as OrderMessageTemplate[];
+  }
+
+  setOrderMessageTemplate(id: string, body: string): OrderMessageTemplate {
+    const now = new Date().toISOString();
+    this.db.prepare("UPDATE order_message_templates SET body = ?, updated_at = ? WHERE id = ?").run(body, now, id);
+    const row = this.getOrderMessageTemplateById(id);
+    if (!row) throw new Error(`Unknown order message template id "${id}"`);
+    return row;
+  }
+
+  private getOrderMessageTemplateById(id: string): OrderMessageTemplate | null {
+    const row = this.db
+      .prepare("SELECT id, fulfillment_type as fulfillmentType, payment_status as paymentStatus, body, updated_at as updatedAt FROM order_message_templates WHERE id = ?")
+      .get(id) as OrderMessageTemplate | undefined;
+    return row ?? null;
   }
 
   // Populates a brand-new database with a default admin login (Admin/0000

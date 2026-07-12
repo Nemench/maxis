@@ -80,7 +80,7 @@ import { iconSwitcher, type IconVariant } from "./iconSwitcher";
 import { applyTheme, applyThemeMode, deriveShades, initThemeMode, ThemeMode } from "./theme";
 import { tokenStorage } from "./tokenStorage";
 
-type Tab = "orders" | "pos" | "queue" | "history" | "products" | "users" | "settings" | "reports" | "weighIn" | "statistics" | "crm";
+type Tab = "orders" | "pos" | "queue" | "history" | "products" | "users" | "settings" | "reports" | "weighIn" | "statistics" | "crm" | "consolidate";
 
 // Applied at module load (before React's first render) so there's no flash
 // of the wrong theme — reads the stored preference (or system default).
@@ -89,6 +89,22 @@ initThemeMode();
 const deptStatusFlow: DeptStatus[] = ["New", "Received", "Ready", "Done"];
 const emptyLine: OrderItemInput = { productId: null, name: "", kg: null, quantity: null, notes: "", unitPrice: null, lineTotal: null, wantedPrice: null, department: "counter" };
 const EMPTY_PRODUCT: ProductInput = { name: "", category: "", unitDefault: "kg", pricePerUnit: null, prepNotes: "", department: "counter", lowStockThreshold: null, barcode: null, isRawIntake: 0 };
+
+// Sticker label print preferences (size/copies/which fields show) — a
+// per-device convenience, not shop-wide config, so plain localStorage
+// rather than the server settings table: whoever's printing labels on
+// this particular till/device just wants their last choice remembered.
+const LABEL_PREFS_KEY = "nemenchpos-label-prefs";
+const DEFAULT_LABEL_PREFS: LabelPrefs = { size: "50x30", copies: 1, showPrice: true, showCategory: false, showCost: false };
+function loadLabelPrefs(): LabelPrefs {
+  try {
+    const raw = localStorage.getItem(LABEL_PREFS_KEY);
+    if (!raw) return DEFAULT_LABEL_PREFS;
+    return { ...DEFAULT_LABEL_PREFS, ...(JSON.parse(raw) as Partial<LabelPrefs>) };
+  } catch {
+    return DEFAULT_LABEL_PREFS;
+  }
+}
 
 const currency = new Intl.NumberFormat(appSettings.locale, { style: "currency", currency: appSettings.currency });
 
@@ -417,6 +433,9 @@ function MainApp({ currentUser, onLogout, branding, onBrandingChange, themeMode,
               )}
               <button className={tab === "queue" ? "active" : ""} onClick={() => setTab("queue")}><ClipboardList size={18} /><span>Queue</span></button>
               <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}><History size={18} /><span>History</span></button>
+              {(currentUser.role === "kitchen" || currentUser.role === "counter" || currentUser.role === "cashier" || currentUser.role === "admin") && (
+                <button className={tab === "consolidate" ? "active" : ""} onClick={() => setTab("consolidate")}><ScanLine size={18} /><span>Consolidate</span></button>
+              )}
               {currentUser.role === "admin" && (
                 <button className={tab === "products" ? "active" : ""} onClick={() => setTab("products")}>
                   <Package size={18} /><span>Stock</span>
@@ -495,6 +514,9 @@ function MainApp({ currentUser, onLogout, branding, onBrandingChange, themeMode,
         )}
         {tab === "queue" && <Queue orders={activeOrders} currentUser={currentUser} onChanged={refresh} printStyle={printStyle} printerMap={printerMap} />}
         {tab === "history" && <HistoryView orders={historyOrders} printStyle={printStyle} printerMap={printerMap} />}
+        {tab === "consolidate" && (currentUser.role === "kitchen" || currentUser.role === "counter" || currentUser.role === "cashier" || currentUser.role === "admin") && (
+          <ConsolidationPanel printStyle={printStyle} printerMap={printerMap} />
+        )}
         {tab === "products" && (currentUser.role === "admin" || isStockTaker) && <StockPanel products={products} currentUser={currentUser} onChanged={refresh} />}
         {tab === "weighIn" && (currentUser.role === "admin" || isStockTaker) && <WeighInPanel products={products} currentUser={currentUser} onChanged={refresh} />}
         {tab === "users" && currentUser.role === "admin" && <UsersPanel />}
@@ -767,6 +789,38 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
   // Same guard on wiping the whole sale — one stray tap on Clear Sale
   // shouldn't be able to drop an entire in-progress cart.
   const [pendingClearSale, setPendingClearSale] = useState(false);
+  const [reorderScanOpen, setReorderScanOpen] = useState(false);
+  const [reorderBusy, setReorderBusy] = useState(false);
+  const [reorderError, setReorderError] = useState("");
+  // Bumped on a failed lookup so <ScanCodeModal key={reorderScanAttempt}>
+  // fully remounts (and its camera restarts) rather than sitting dead —
+  // the underlying useBarcodeScan hook only (re)starts scanning when its
+  // component mounts/its `active` prop flips, neither of which happens on
+  // its own just because an error appeared while the modal stayed open.
+  const [reorderScanAttempt, setReorderScanAttempt] = useState(0);
+
+  // Scans a past order's printed barcode and appends its line items to the
+  // current cart — "reorder" for a repeat customer, or a fast way to redo
+  // an accidental full-sale reprint. Deliberately only copies items, not
+  // the source order's customer/discount/payment details: this is a new,
+  // independent sale, not a duplicate of the old one's whole identity.
+  const reorderFromTicket = async (ticketNumber: string) => {
+    setReorderBusy(true); setReorderError("");
+    try {
+      const order = await api.orders.getByTicket(ticketNumber);
+      const items: OrderItemInput[] = order.items.map((i) => ({
+        productId: i.productId, name: i.name, kg: i.kg, quantity: i.quantity,
+        notes: i.notes, unitPrice: i.unitPrice, lineTotal: i.lineTotal, wantedPrice: i.wantedPrice, department: i.department
+      }));
+      setCart((cur) => [...cur, ...items]);
+      setReorderScanOpen(false);
+    } catch (err) {
+      setReorderError(err instanceof Error ? err.message : "Couldn't find that order");
+      setReorderScanAttempt((n) => n + 1);
+    } finally {
+      setReorderBusy(false);
+    }
+  };
 
   // Survives switching tabs away from POS and back (this component
   // unmounts on tab switch, which would otherwise wipe React state), and
@@ -912,13 +966,29 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
     <div className="pos-panel">
       <div className="pos-catalog">
         <div className="pos-catalog-controls">
-          <input className="pos-search" placeholder="Search items…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          <div className="pos-search-row">
+            <input className="pos-search" placeholder="Search items…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <button type="button" className="secondary" onClick={() => { setReorderError(""); setReorderScanOpen(true); }} title="Scan a past receipt to add its items to this sale">
+              <ScanLine size={16} /> Reorder
+            </button>
+          </div>
           <div className="pos-category-tabs">
             {categories.map((c) => (
               <button key={c} type="button" className={`pos-category-tab ${category === c ? "active" : ""}`} onClick={() => setCategory(c)}>{c}</button>
             ))}
           </div>
         </div>
+        {reorderScanOpen && (
+          <ScanCodeModal
+            key={reorderScanAttempt}
+            title="Reorder from receipt"
+            hint="Point the camera at the barcode on a past receipt."
+            busy={reorderBusy}
+            error={reorderError}
+            onDetected={(code) => void reorderFromTicket(code)}
+            onClose={() => setReorderScanOpen(false)}
+          />
+        )}
         <div className="pos-product-grid">
           {visibleProducts.map((p) => (
             <button
@@ -1319,6 +1389,62 @@ function BarcodeAddModal({ defaultDept, onAdd, onClose }: { defaultDept: Departm
   );
 }
 
+// Generic "scan (or type) a code, hand the raw string back to the caller"
+// modal — the shared building block behind Queue/History's "Scan order"
+// button and POS's "Scan to reorder," both of which just need the decoded
+// ticketNumber string handed back, not the barcode-to-product resolution
+// BarcodeAddModal does (this is scanning an ORDER's barcode, never a
+// product's). `busy`/`error` are controlled by the caller so it can show
+// its own "looking up that order…" state after a code comes back, rather
+// than this modal owning a lookup it doesn't know how to do.
+function ScanCodeModal({ title, hint, busy, error, onDetected, onClose }: {
+  title: string; hint: string; busy?: boolean; error?: string; onDetected: (code: string) => void; onClose: () => void;
+}) {
+  const [step, setStep] = useState<"scan" | "manual">("scan");
+  const [manualCode, setManualCode] = useState("");
+
+  const { videoRef, isNative } = useBarcodeScan({
+    active: step === "scan",
+    onDetected,
+    onError: () => setStep("manual")
+  });
+
+  const submitManual = (e: FormEvent) => {
+    e.preventDefault();
+    if (!manualCode.trim()) return;
+    onDetected(manualCode.trim());
+  };
+
+  return (
+    <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal-card panel">
+        <div className="modal-header">
+          <h2>{title}</h2>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </div>
+        {step === "scan" && (
+          <div className="modal-body barcode-scan">
+            {isNative
+              ? <p className="settings-hint">Opening the camera…</p>
+              : <><video ref={videoRef} className="barcode-video" muted playsInline /><p className="settings-hint">{hint}</p></>}
+            <button type="button" className="secondary" onClick={() => setStep("manual")}>Enter manually instead</button>
+          </div>
+        )}
+        {step === "manual" && (
+          <form className="modal-body" onSubmit={submitManual}>
+            <label>Ticket number<input autoFocus value={manualCode} onChange={(e) => setManualCode(e.target.value)} placeholder="e.g. 20260712-002" /></label>
+            <footer className="actions">
+              <button type="button" className="secondary" onClick={() => setStep("scan")}>Back to camera</button>
+              <button type="submit" disabled={busy || !manualCode.trim()}>{busy ? "Looking up…" : "Find"}</button>
+            </footer>
+          </form>
+        )}
+        {error && <p className="form-error">{error}</p>}
+      </div>
+    </div>
+  );
+}
+
 // ── Product combobox ──────────────────────────────────────────────────────────
 
 // Autocomplete input for picking a catalog product on an order line, while
@@ -1402,6 +1528,7 @@ function ProductCombobox({ products, productId, itemName, onSelect, onNameChange
 // sight of the rest of the queue.
 function Queue({ orders, currentUser, onChanged, printStyle, printerMap }: { orders: Order[]; currentUser: User; onChanged: () => Promise<void>; printStyle: string; printerMap: Record<string, string> }) {
   const [search, setSearch] = useState("");
+  const [scanOpen, setScanOpen] = useState(false);
   const sorted = useMemo(() => sortByUrgency(orders), [orders]);
   const displayed = useMemo(() => {
     if (!search.trim()) return sorted;
@@ -1416,14 +1543,25 @@ function Queue({ orders, currentUser, onChanged, printStyle, printerMap }: { ord
 
   return (
     <>
-      <div className="search-bar">
-        <input placeholder="Search by name, phone, ticket or item…" value={search} onChange={(e) => setSearch(e.target.value)} />
-        {search && <button type="button" className="search-clear" onClick={() => setSearch("")}>×</button>}
+      <div className="search-bar-row">
+        <div className="search-bar">
+          <input placeholder="Search by name, phone, ticket or item…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          {search && <button type="button" className="search-clear" onClick={() => setSearch("")}>×</button>}
+        </div>
+        <button type="button" className="secondary" onClick={() => setScanOpen(true)} title="Scan a receipt's barcode"><ScanLine size={16} /> Scan order</button>
       </div>
       {displayed.length === 0
         ? <EmptyState title="No active tickets" detail="New orders will appear here." />
         : <div className="ticket-grid">{displayed.map((order) => <TicketCard key={order.id} order={order} currentUser={currentUser} onChanged={onChanged} printStyle={printStyle} printerMap={printerMap} />)}</div>
       }
+      {scanOpen && (
+        <ScanCodeModal
+          title="Scan order"
+          hint="Point the camera at the barcode on a printed receipt/ticket."
+          onDetected={(code) => { setSearch(code); setScanOpen(false); }}
+          onClose={() => setScanOpen(false)}
+        />
+      )}
     </>
   );
 }
@@ -1586,6 +1724,7 @@ function TicketCard({ order, currentUser, onChanged, printStyle, printerMap }: {
 // Table of completed ("Done") orders within the configured retention window.
 function HistoryView({ orders, printStyle, printerMap }: { orders: Order[]; printStyle: string; printerMap: Record<string, string> }) {
   const [search, setSearch] = useState("");
+  const [scanOpen, setScanOpen] = useState(false);
   const [emailReceiptOrder, setEmailReceiptOrder] = useState<Order | null>(null);
   const displayed = useMemo(() => {
     if (!search.trim()) return orders;
@@ -1602,10 +1741,21 @@ function HistoryView({ orders, printStyle, printerMap }: { orders: Order[]; prin
   if (orders.length === 0) return <EmptyState title="No completed orders yet" detail="Done tickets are kept here." />;
   return (
     <div className="panel table-panel">
-      <div className="search-bar">
-        <input placeholder="Search by name, phone, ticket, item or staff…" value={search} onChange={(e) => setSearch(e.target.value)} />
-        {search && <button type="button" className="search-clear" onClick={() => setSearch("")}>×</button>}
+      <div className="search-bar-row">
+        <div className="search-bar">
+          <input placeholder="Search by name, phone, ticket, item or staff…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          {search && <button type="button" className="search-clear" onClick={() => setSearch("")}>×</button>}
+        </div>
+        <button type="button" className="secondary" onClick={() => setScanOpen(true)} title="Scan a receipt's barcode"><ScanLine size={16} /> Scan order</button>
       </div>
+      {scanOpen && (
+        <ScanCodeModal
+          title="Scan order"
+          hint="Point the camera at the barcode on a printed receipt/ticket."
+          onDetected={(code) => { setSearch(code); setScanOpen(false); }}
+          onClose={() => setScanOpen(false)}
+        />
+      )}
       <table>
           <thead>
             <tr><th>Ticket</th><th>Customer</th><th>Phone</th><th>Requested by</th><th>Items</th><th>Completed</th><th></th></tr>
@@ -1630,6 +1780,169 @@ function HistoryView({ orders, printStyle, printerMap }: { orders: Order[]; prin
       {emailReceiptOrder && (
         <EmailReceiptModal order={emailReceiptOrder} printStyle={printStyle} onClose={() => setEmailReceiptOrder(null)} />
       )}
+    </div>
+  );
+}
+
+// ── Order Consolidation ──────────────────────────────────────────────────────
+
+// Final packing/QA step: staff pick a "Ready" (prepared, not yet handed
+// over) order, scan every line item's barcode to verify it against that
+// order, then finalize into one consolidation barcode + receipt. See
+// server/database.ts's Order Consolidation section for the actual
+// scan-matching/finalize rules this UI is just a thin front-end for.
+function ConsolidationPanel({ printStyle, printerMap }: { printStyle: string; printerMap: Record<string, string> }) {
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Order | null>(null);
+  const [scanOpen, setScanOpen] = useState(false);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanError, setScanError] = useState("");
+  // Bumped on a failed scan so <ScanCodeModal key={scanAttempt}> fully
+  // remounts (and its camera restarts) — same reasoning as POS's
+  // reorderScanAttempt.
+  const [scanAttempt, setScanAttempt] = useState(0);
+  const [finalizing, setFinalizing] = useState(false);
+  const [finalizeError, setFinalizeError] = useState("");
+  const [finalized, setFinalized] = useState<Order | null>(null);
+
+  const load = () => {
+    setLoading(true);
+    api.consolidation.pending().then(setOrders).catch(() => undefined).finally(() => setLoading(false));
+  };
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 15_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const selectOrder = (order: Order) => {
+    setSelected(order);
+    setFinalized(null);
+    setFinalizeError("");
+    setScanError("");
+  };
+
+  const scanCode = async (code: string) => {
+    if (!selected) return;
+    setScanBusy(true); setScanError("");
+    try {
+      const updated = await api.consolidation.scan(selected.id, code);
+      setSelected(updated);
+      setScanOpen(false);
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : "Scan failed");
+      setScanAttempt((n) => n + 1);
+    } finally {
+      setScanBusy(false);
+    }
+  };
+
+  const finalize = async () => {
+    if (!selected) return;
+    setFinalizing(true); setFinalizeError("");
+    try {
+      const result = await api.consolidation.finalize(selected.id);
+      setFinalized(result);
+      setSelected(null);
+      load();
+    } catch (err) {
+      setFinalizeError(err instanceof Error ? err.message : "Could not finalize");
+    } finally {
+      setFinalizing(false);
+    }
+  };
+
+  // Free-text lines (no productId) have no barcode to scan, so they're
+  // excluded from what "every item scanned" requires — same rule the
+  // server enforces in finalizeConsolidation, kept in sync here so the
+  // Finalize button's enabled state actually matches what a click would do.
+  const scannable = selected ? selected.items.filter((i) => i.productId != null) : [];
+  const scannedCount = scannable.filter((i) => i.scannedAt).length;
+  const allScanned = scannable.every((i) => i.scannedAt);
+
+  if (finalized) {
+    return (
+      <div className="panel consolidation-result">
+        <h2>Order consolidated</h2>
+        <p className="settings-hint">Ticket {finalized.ticketNumber} — every item verified. One barcode now represents the whole order.</p>
+        {finalized.consolidationBarcode && <BarcodeImage value={finalized.consolidationBarcode} />}
+        <footer className="actions">
+          <button type="button" onClick={() => void printReceipt(finalized, "master", printStyle, printerMap.master ?? "")}><Printer size={16} /> Print receipt</button>
+          <button type="button" className="secondary" onClick={() => setFinalized(null)}>Done</button>
+        </footer>
+      </div>
+    );
+  }
+
+  if (selected) {
+    return (
+      <div className="panel">
+        <div className="modal-header">
+          <h2>{selected.ticketNumber} — {selected.customerName || "POS sale"}</h2>
+          <button type="button" className="secondary" onClick={() => setSelected(null)}>Back to list</button>
+        </div>
+        <p className="settings-hint">{scannedCount} of {scannable.length} items scanned</p>
+        <table>
+          <thead><tr><th>Item</th><th>Qty</th><th></th></tr></thead>
+          <tbody>
+            {selected.items.map((i) => (
+              <tr key={i.id}>
+                <td>{i.name}{i.notes ? <div className="note">{i.notes}</div> : null}</td>
+                <td>{i.kg ? `${i.kg} kg` : i.quantity ? `×${i.quantity}` : "—"}</td>
+                <td>
+                  {i.productId == null
+                    ? <span className="muted">No barcode</span>
+                    : i.scannedAt
+                      ? <span className="consent-badge consent-opted_in">Scanned</span>
+                      : <span className="consent-badge consent-unknown">Pending</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!allScanned && <p className="form-error">{scannable.length - scannedCount} of {scannable.length} items still need to be scanned</p>}
+        {finalizeError && <p className="form-error">{finalizeError}</p>}
+        <footer className="actions">
+          <button type="button" className="secondary" onClick={() => { setScanError(""); setScanOpen(true); }}><ScanLine size={16} /> Scan item</button>
+          <button type="button" disabled={!allScanned || finalizing} onClick={() => void finalize()}>{finalizing ? "Finalizing…" : "Finalize order"}</button>
+        </footer>
+        {scanOpen && (
+          <ScanCodeModal
+            key={scanAttempt}
+            title="Scan item"
+            hint="Point the camera at the product's barcode."
+            busy={scanBusy}
+            error={scanError}
+            onDetected={(code) => void scanCode(code)}
+            onClose={() => setScanOpen(false)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  if (!loading && orders.length === 0) {
+    return <EmptyState title="Nothing to consolidate" detail="Orders show up here once they're Ready and haven't been consolidated yet." />;
+  }
+
+  return (
+    <div className="panel table-panel">
+      <table>
+        <thead><tr><th>Ticket</th><th>Customer</th><th>Items</th><th>Ready since</th><th></th></tr></thead>
+        <tbody>
+          {loading && <tr><td colSpan={5} className="muted">Loading…</td></tr>}
+          {!loading && orders.map((o) => (
+            <tr key={o.id}>
+              <td>{o.ticketNumber}</td>
+              <td>{o.customerName || "POS sale"}</td>
+              <td>{o.items.length}</td>
+              <td>{new Date(o.updatedAt).toLocaleString(appSettings.locale)}</td>
+              <td><button type="button" className="secondary sm" onClick={() => selectOrder(o)}>Consolidate</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -1761,6 +2074,14 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
   // from the catalog forever after) — PIN-gated the same as any other
   // permanent/reversal-requiring action in this app (see POS's line-removal).
   const [pendingDelete, setPendingDelete] = useState<{ id: number; name: string } | null>(null);
+  const [labelPrefs, setLabelPrefsState] = useState<LabelPrefs>(loadLabelPrefs);
+  const setLabelPrefs = (patch: Partial<LabelPrefs>) => {
+    setLabelPrefsState((cur) => {
+      const next = { ...cur, ...patch };
+      localStorage.setItem(LABEL_PREFS_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
   const categories = useMemo(() => [...new Set(products.map((p) => p.category).filter(Boolean))], [products]);
   // Only non-raw-intake products make sense as a cut/sub-product — a raw
   // carcass isn't itself "yielded" from another raw carcass.
@@ -1866,7 +2187,10 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
 
   const printSticker = () => {
     if (!editing.barcode) return;
-    printHtml(buildBarcodeStickerHtml(editing.name, editing.barcode, editing.pricePerUnit ?? null));
+    printHtml(buildBarcodeStickerHtml(
+      { name: editing.name, category: editing.category, barcode: editing.barcode, pricePerUnit: editing.pricePerUnit, costPerUnit: editing.costPerUnit ?? null },
+      labelPrefs
+    ));
   };
 
   return (
@@ -1930,9 +2254,26 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
         {editing.id && editing.barcode && (
           <div className="barcode-preview">
             <BarcodeImage value={editing.barcode} />
+            <div className="label-options">
+              <label className="label-options-field">
+                Label size
+                <select value={labelPrefs.size} onChange={(e) => setLabelPrefs({ size: e.target.value as LabelSize })}>
+                  <option value="50x30">50 x 30mm</option>
+                  <option value="40x30">40 x 30mm</option>
+                  <option value="38x25">38 x 25mm</option>
+                </select>
+              </label>
+              <label className="label-options-field">
+                Copies
+                <input type="number" min="1" max="200" value={labelPrefs.copies} onChange={(e) => setLabelPrefs({ copies: Number(e.target.value) || 1 })} />
+              </label>
+              <label className="checkbox-label sm"><input type="checkbox" checked={labelPrefs.showPrice} onChange={(e) => setLabelPrefs({ showPrice: e.target.checked })} /> Price</label>
+              <label className="checkbox-label sm"><input type="checkbox" checked={labelPrefs.showCategory} onChange={(e) => setLabelPrefs({ showCategory: e.target.checked })} /> Category</label>
+              <label className="checkbox-label sm"><input type="checkbox" checked={labelPrefs.showCost} onChange={(e) => setLabelPrefs({ showCost: e.target.checked })} /> Cost price</label>
+            </div>
             <div className="barcode-preview-actions">
               <button type="button" className="secondary sm" onClick={() => void regenerateBarcode()} disabled={busy}>Regenerate barcode</button>
-              <button type="button" className="secondary sm" onClick={printSticker}><Printer size={16} /> Print sticker</button>
+              <button type="button" className="secondary sm" onClick={printSticker}><Printer size={16} /> Print {labelPrefs.copies > 1 ? `${labelPrefs.copies} stickers` : "sticker"}</button>
             </div>
           </div>
         )}
@@ -4620,6 +4961,26 @@ function buildReceiptHtml(order: Order, type: "kitchen" | "counter" | "master", 
     : (logoDataUri ?? assetUrl(receiptBranding.logoUrl || "/logo.jpg"));
   const siteName = esc(receiptBranding.siteName || "NemenchPos");
   const { blue, blueDark } = deriveShades(/^#[0-9a-f]{6}$/i.test(receiptBranding.themeColor) ? receiptBranding.themeColor : "#1a47a0");
+  // CODE128, not EAN13 — the ticket number ("20260712-002") has a dash and
+  // isn't 13 digits, so it can't be an EAN13. Scanning it (Queue/History's
+  // "Scan order" button, or POS's "Scan to reorder") looks the order back
+  // up by this exact ticketNumber (see api.orders.getByTicket) — no data
+  // beyond the ticket number itself is encoded; that's a deliberate choice
+  // over trying to cram per-item data into a 1D barcode's limited capacity,
+  // see server/routes/orders.ts's by-ticket route comment for why.
+  // displayValue:false since the ticket number is already shown as text
+  // right next to it — repeating it under the barcode would be redundant.
+  const ticketBarcodeSvg = renderBarcodeSvgMarkup(order.ticketNumber, "CODE128", { height: 28, margin: 0, displayValue: false });
+  // Order Consolidation feature: an EAN-13, distinct prefix from both the
+  // ticket CODE128 above and every per-product barcode (see
+  // orderConsolidationBarcode.ts) — only present once every line item has
+  // been scanned and verified (server/database.ts's finalizeConsolidation),
+  // so most receipts never show this block at all. displayValue:true here
+  // (unlike the ticket barcode) since this is the definitive "verified
+  // complete" record staff/customer may want to read the digits off of.
+  const consolidationBarcodeSvg = order.consolidationBarcode && !forEmail
+    ? renderBarcodeSvgMarkup(order.consolidationBarcode, "EAN13", { height: 45, margin: 4, displayValue: true })
+    : "";
 
   // Only the customer-facing "master" receipt is a financial document —
   // kitchen/counter slips are prep instructions, so they keep the
@@ -4673,6 +5034,7 @@ body{font-family:Inter,'Segoe UI',Arial,sans-serif;font-size:13px;color:#1a1a2e;
 .hdr-left .legal{font-size:11px;color:#666;margin-top:6px;line-height:1.4}
 .hdr-right{text-align:right}.logo{width:72px;height:72px;border-radius:50%;object-fit:cover;border:2px solid ${blueDark}}
 .tnum{font-size:14px;font-weight:700;color:${blueDark};margin-top:6px}.dt{font-size:12px;color:#666;margin-top:2px}
+.tbarcode{margin-top:4px}.tbarcode svg{height:22px}
 .cbox{border:1px solid #c8d5ee;border-radius:8px;padding:14px 18px;margin-bottom:20px;background:#f4f7fd}
 .clbl{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#5a6480;font-weight:700;margin-bottom:8px}
 .cname{font-size:16px;font-weight:700;color:${blueDark}}.cline{font-size:13px;color:#333;margin-top:4px}
@@ -4687,6 +5049,8 @@ tr:nth-child(even) td{background:#f8f9fc}tr:last-child td{border-bottom:none}
 .totals td:last-child{text-align:right}
 .totals .grand td{font-size:17px;font-weight:800;color:#1a1a2e;border-top:2px solid ${blueDark};padding-top:8px}
 .footer{margin-top:40px;text-align:center;color:#888;font-size:12px;border-top:1px solid #e0e6f0;padding-top:12px}
+.consolidated{margin-top:16px;padding:12px;border:2px solid ${blueDark};border-radius:8px;text-align:center}
+.consolidated .clbl{color:${blueDark}}
 </style></head><body>
 ${forEmail ? '<div style="max-width:480px;margin:0 auto;padding:16px;box-sizing:border-box;">' : ""}
 <div class="hdr">
@@ -4698,7 +5062,7 @@ ${forEmail ? '<div style="max-width:480px;margin:0 auto;padding:16px;box-sizing:
       ${receiptBranding.vatRegistered && receiptBranding.vatNumber ? `VAT Reg. No: ${esc(receiptBranding.vatNumber)}` : ""}
     </div>` : ""}
   </div>
-  <div class="hdr-right">${logoUrl ? `<img class="logo" src="${logoUrl}" alt="${siteName}">` : ""}<div class="tnum">${esc(order.ticketNumber)}</div><div class="dt">${dateStr} &nbsp; ${timeStr}</div></div>
+  <div class="hdr-right">${logoUrl ? `<img class="logo" src="${logoUrl}" alt="${siteName}">` : ""}<div class="tnum">${esc(order.ticketNumber)}</div><div class="dt">${dateStr} &nbsp; ${timeStr}</div>${forEmail ? "" : `<div class="tbarcode">${ticketBarcodeSvg}</div>`}</div>
 </div>
 ${order.customerName ? `<div class="cbox">
   <div class="clbl">Customer Details</div>
@@ -4719,6 +5083,7 @@ ${isReceipt ? `<table class="totals"><tbody>
   <tr class="grand"><td>Total</td><td>${currency.format(totalDue)}</td></tr>
   ${paymentLine ? `<tr><td colspan="2">${esc(paymentLine)}</td></tr>` : ""}
 </tbody></table>` : ""}
+${consolidationBarcodeSvg ? `<div class="consolidated"><div class="clbl">Order Verified &amp; Consolidated</div>${consolidationBarcodeSvg}</div>` : ""}
 <div class="footer">Thank you for your order - ${siteName}</div>
 ${forEmail ? "</div>" : ""}
 </body></html>`;
@@ -4751,6 +5116,9 @@ body{font-family:'Courier New',Courier,monospace;font-size:12px;width:72mm;paddi
 .totals td:last-child{text-align:right}
 .totals .grand td{font-size:15px;font-weight:bold;border-top:1px solid #000;padding-top:4px}
 .footer{font-size:11px;color:#555}
+.tbarcode{margin-top:2mm}.tbarcode svg{height:20px;max-width:100%}
+.consolidated{margin-top:3mm;padding:2mm;border:1px solid #000}
+.consolidated .clbl{font-size:10px;font-weight:bold}
 </style></head><body>
 ${forEmail ? '<div style="max-width:380px;margin:0 auto;padding:16px;box-sizing:border-box;">' : ""}
 <div class="center">
@@ -4763,6 +5131,7 @@ ${forEmail ? '<div style="max-width:380px;margin:0 auto;padding:16px;box-sizing:
   </div>` : ""}
   <div class="tnum">${esc(order.ticketNumber)}</div>
   <div class="dt">${dateStr} &nbsp; ${timeStr}</div>
+  ${forEmail ? "" : `<div class="tbarcode">${ticketBarcodeSvg}</div>`}
 </div>
 <hr class="sep">
 ${order.customerName ? `<div class="cust">
@@ -4786,6 +5155,7 @@ ${receiptBranding.vatRegistered ? `<tr><td>VAT incl. (15%)</td><td>${currency.fo
 </tbody></table>
 ${paymentLine ? `<div class="center" style="font-size:11px;margin-top:4px">${esc(paymentLine)}</div>` : ""}
 <hr class="sep">` : ""}
+${consolidationBarcodeSvg ? `<div class="consolidated center"><div class="clbl">ORDER VERIFIED &amp; CONSOLIDATED</div>${consolidationBarcodeSvg}</div>` : ""}
 <div class="center footer">Thank you for your order</div>
 ${forEmail ? "</div>" : ""}
 </body></html>`;
@@ -4914,30 +5284,59 @@ ${supplierSections}
 // React-owned <svg>) so it can be embedded in the standalone sticker
 // document below — JsBarcode draws into a real DOM element regardless, so
 // a detached one is created, drawn into, then serialized and discarded.
-function renderBarcodeSvgMarkup(value: string): string {
+function renderBarcodeSvgMarkup(value: string, format: "EAN13" | "CODE128" = "EAN13", opts: { height?: number; margin?: number; displayValue?: boolean } = {}): string {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  JsBarcode(svg, value, { format: "EAN13", displayValue: true, height: 60, margin: 8 });
+  JsBarcode(svg, value, { format, displayValue: opts.displayValue ?? true, height: opts.height ?? 60, margin: opts.margin ?? 8 });
   return new XMLSerializer().serializeToString(svg);
 }
 
-// A small printable sticker — barcode plus item name/price — reusing the
-// same printHtml()/api.print() pipe as receipts and KOT tickets (see
-// printReceipt) rather than a separate print mechanism, so it goes to
-// whatever printer is already configured. Sized for a small label
-// (50mm x 30mm) rather than a full receipt/page.
-function buildBarcodeStickerHtml(name: string, barcode: string, pricePerUnit: number | null): string {
-  const barcodeSvg = renderBarcodeSvgMarkup(barcode);
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sticker — ${esc(barcode)}</title><style>
-@page{size:50mm 30mm;margin:0}*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:Inter,Arial,sans-serif;width:50mm;height:30mm;padding:2mm;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
-.name{font-size:10px;font-weight:700;line-height:1.2;max-height:24px;overflow:hidden}
+// Common small-label sizes this app can print a sticker at — "50x30" is
+// the original fixed size this feature launched with; the other two match
+// popular thermal-label-roll dimensions so a shop isn't stuck buying one
+// specific label stock just for this app.
+const LABEL_SIZES = {
+  "50x30": { widthMm: 50, heightMm: 30, nameMax: 24, svgMax: 16 },
+  "40x30": { widthMm: 40, heightMm: 30, nameMax: 24, svgMax: 14 },
+  "38x25": { widthMm: 38, heightMm: 25, nameMax: 18, svgMax: 11 }
+} as const;
+export type LabelSize = keyof typeof LABEL_SIZES;
+
+export interface LabelPrefs {
+  size: LabelSize;
+  copies: number;
+  showPrice: boolean;
+  showCategory: boolean;
+  showCost: boolean;
+}
+
+// A small printable sticker — barcode plus whichever fields prefs asks
+// for — reusing the same printHtml()/api.print() pipe as receipts and KOT
+// tickets (see printReceipt) rather than a separate print mechanism, so it
+// goes to whatever printer is already configured. `copies` repeats the
+// same label on successive forced page-breaks — correct for a
+// continuous-roll label printer (each page break advances one physical
+// label) and equally fine on a sheet printer (one label per page).
+function buildBarcodeStickerHtml(product: { name: string; category: string; barcode: string; pricePerUnit: number | null; costPerUnit: number | null }, prefs: LabelPrefs): string {
+  const { widthMm, heightMm, nameMax, svgMax } = LABEL_SIZES[prefs.size];
+  const barcodeSvg = renderBarcodeSvgMarkup(product.barcode);
+  const label = `
+<div class="name">${esc(product.name)}</div>
+${prefs.showCategory && product.category ? `<div class="meta">${esc(product.category)}</div>` : ""}
+${prefs.showPrice && product.pricePerUnit != null ? `<div class="price">${currency.format(product.pricePerUnit)}/kg</div>` : ""}
+${prefs.showCost && product.costPerUnit != null ? `<div class="meta">Cost: ${currency.format(product.costPerUnit)}/kg</div>` : ""}
+${barcodeSvg}`;
+  const copies = Math.min(Math.max(1, Math.round(prefs.copies) || 1), 200);
+  const pages = Array.from({ length: copies }, (_, i) => `<div class="label"${i > 0 ? ' style="page-break-before:always"' : ""}>${label}</div>`).join("");
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sticker — ${esc(product.barcode)}</title><style>
+@page{size:${widthMm}mm ${heightMm}mm;margin:0}*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Inter,Arial,sans-serif}
+.label{width:${widthMm}mm;height:${heightMm}mm;padding:2mm;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;overflow:hidden}
+.name{font-size:10px;font-weight:700;line-height:1.2;max-height:${nameMax}px;overflow:hidden}
+.meta{font-size:8px;color:#444;margin-top:0.5mm}
 .price{font-size:11px;font-weight:800;margin-top:1mm}
-svg{width:100%;max-height:16mm}
-</style></head><body>
-<div class="name">${esc(name)}</div>
-${pricePerUnit != null ? `<div class="price">${currency.format(pricePerUnit)}/kg</div>` : ""}
-${barcodeSvg}
-</body></html>`;
+svg{width:100%;max-height:${svgMax}mm}
+</style></head><body>${pages}</body></html>`;
 }
 
 // Opens a built HTML document for printing. Three paths:
@@ -5211,7 +5610,7 @@ function calculateLineTotal(item: OrderItemInput) {
 }
 
 function tabTitle(tab: Tab) {
-  return { orders: "New Order", pos: "POS", queue: "Prep Queue", history: "Order History", products: "Stock", users: "Users", settings: "Settings", reports: "Reports", weighIn: "Weigh-In", statistics: "Statistics", crm: "CRM" }[tab];
+  return { orders: "New Order", pos: "POS", queue: "Prep Queue", history: "Order History", products: "Stock", users: "Users", settings: "Settings", reports: "Reports", weighIn: "Weigh-In", statistics: "Statistics", crm: "CRM", consolidate: "Consolidate Order" }[tab];
 }
 
 function tabSubtitle(tab: Tab) {
@@ -5226,6 +5625,7 @@ function tabSubtitle(tab: Tab) {
     reports: "View and download orders for a date range.",
     weighIn: "Log received stock by weight, batch by batch.",
     statistics: "Sales performance and stock movement per item.",
-    crm: "Contacts, message history, and WhatsApp automation."
+    crm: "Contacts, message history, and WhatsApp automation.",
+    consolidate: "Scan every item to verify a Ready order, then finalize one barcode and receipt for it."
   }[tab];
 }

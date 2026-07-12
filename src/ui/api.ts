@@ -96,6 +96,10 @@ export const api = {
     list: (scope: string) => req<Order[]>("GET", `/orders?scope=${scope}`),
     create: (data: CreateOrderInput) => req<Order>("POST", "/orders", data),
     get: (id: number) => req<Order>("GET", `/orders/${id}`),
+    // Throws (caught by callers) if no order matches — an unrecognized or
+    // stale scanned ticket number is an expected, user-facing case, not a
+    // bug.
+    getByTicket: (ticketNumber: string) => req<Order>("GET", `/orders/by-ticket/${encodeURIComponent(ticketNumber)}`),
     addItem: (id: number, item: OrderItemInput) => req<Order>("POST", `/orders/${id}/items`, item),
     updateStatus: (id: number, status: OrderStatus) => req<Order>("PATCH", `/orders/${id}/status`, { status }),
     updateDeptStatus: (id: number, department: Department, status: DeptStatus) =>
@@ -177,5 +181,13 @@ export const api = {
     uploadCampaignImage: (dataUrl: string) => req<{ imageUrl: string }>("POST", "/email-subscribers/campaign-image", { dataUrl }),
     sendCampaign: (subject: string, body: string, promo?: CampaignPromo) =>
       req<{ queued: number }>("POST", "/email-subscribers/send-campaign", { subject, body, promo })
+  },
+  consolidation: {
+    pending: () => req<Order[]>("GET", "/consolidation/pending"),
+    // Throws (caught by callers) on a no-match/already-scanned/already-
+    // consolidated code — never a silent no-op, per the feature's error
+    // handling requirement.
+    scan: (orderId: number, code: string) => req<Order>("POST", `/consolidation/${orderId}/scan`, { code }),
+    finalize: (orderId: number) => req<Order>("POST", `/consolidation/${orderId}/finalize`)
   }
 };

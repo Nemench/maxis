@@ -8,6 +8,8 @@
 // API can never block the order flow that triggered it.
 import { db } from "../index.js";
 import { getTemplate, renderTemplateBody } from "./templates.js";
+import { buildOrderMessage } from "./orderMessages.js";
+import type { Order } from "../../src/shared/types.js";
 
 export type AutomationEvent = "order_ready" | "payment_received";
 
@@ -55,6 +57,59 @@ export function triggerAutomation(event: AutomationEvent, contactId: string | nu
     return true;
   } catch (err) {
     console.error(`[whatsapp-automation] failed to trigger "${event}":`, err);
+    return false;
+  }
+}
+
+// order_ready-specific: prefers the rich, freely-editable pickup/delivery
+// x paid/unpaid body (buildOrderMessage/order_message_templates) over the
+// plain Meta-approved template, but ONLY when a freeform send is actually
+// legal right now - Meta rejects business-initiated freeform messages
+// outside the 24h customer-service window, so outside it this falls back
+// to the exact same triggerAutomation("order_ready", ...) path used
+// before this function existed (unchanged: Meta-approved template,
+// generic "ready for collection"/"out for delivery" wording, no
+// paid/unpaid distinction). Same consent/enabled gating as triggerAutomation
+// either way - duplicated here rather than shared because the freeform
+// branch needs the checks to happen before deciding which body to render,
+// not after.
+export function triggerOrderReadyMessage(order: Order): boolean {
+  try {
+    const contactId = order.crmContactId;
+    if (!contactId) return false;
+
+    const rule = db.getAutomationRule("order_ready");
+    if (!rule || !rule.enabled) return false;
+
+    const contact = db.getContact(contactId);
+    if (!contact) return false;
+    if (contact.consentStatus === "opted_out") return false;
+
+    if (!db.isWithinServiceWindow(contactId)) {
+      // Outside the window: fall back to the plain Meta-approved template,
+      // exactly as before this feature existed.
+      return triggerAutomation("order_ready", contactId, {
+        args: [order.customerName || "there", order.ticketNumber, order.orderType === "delivery" ? "out for delivery" : "ready for collection"]
+      });
+    }
+
+    const settings = db.getAllSettings();
+    const body = buildOrderMessage(order, {
+      businessName: settings.siteName || "NemenchPos",
+      businessAddress: settings.businessAddress || "",
+      closingTime: settings.closingTime || ""
+    });
+
+    db.enqueueOutboundMessage({
+      contactId,
+      messageType: "freeform",
+      freeformBody: body,
+      body,
+      triggeredBy: "automation:order_ready"
+    });
+    return true;
+  } catch (err) {
+    console.error(`[whatsapp-automation] failed to trigger order_ready message:`, err);
     return false;
   }
 }

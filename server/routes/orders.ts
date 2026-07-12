@@ -5,7 +5,7 @@ import { db } from "../index.js";
 import { requireAuth } from "../auth.js";
 import type { AuthRequest } from "../auth.js";
 import type { CreateOrderInput, Order, OrderItemInput, OrderStatus, Department, DeptStatus } from "../../src/shared/types.js";
-import { triggerAutomation } from "../whatsapp/automation.js";
+import { triggerAutomation, triggerOrderReadyMessage } from "../whatsapp/automation.js";
 import { triggerEmailNotification } from "../email/automation.js";
 import { sendEmail } from "../email/mailer.js";
 
@@ -20,11 +20,11 @@ import { sendEmail } from "../email/mailer.js";
 // on this same check rather than a second one.
 function maybeTriggerOrderReady(previousStatus: OrderStatus, order: Order, requestOrigin: string): void {
   if (order.status !== "Ready" || previousStatus === "Ready") return;
-  // 3rd param says whether it's ready for collection or out for delivery
-  // — if you've already submitted a real Meta template for order_ready
-  // with only 2 body variables, adding this 3rd one means resubmitting an
-  // updated template for approval before it'll actually send correctly.
-  triggerAutomation("order_ready", order.crmContactId, { args: [order.customerName || "there", order.ticketNumber, order.orderType === "delivery" ? "out for delivery" : "ready for collection"] });
+  // Prefers the rich pickup/delivery x paid/unpaid body when a freeform
+  // send is legal right now (within the 24h Meta service window), falling
+  // back to the plain Meta-approved template otherwise — see
+  // triggerOrderReadyMessage's own comment for why both paths exist.
+  triggerOrderReadyMessage(order);
   triggerEmailNotification("order_ready", order, requestOrigin);
 }
 
@@ -85,6 +85,22 @@ router.get("/:id", (req, res) => {
   if (!Number.isInteger(id) || id <= 0) { res.status(404).json({ message: "Not found" }); return; }
   try { res.json(db.getOrder(id)); }
   catch (err) { res.status(404).json({ message: err instanceof Error ? err.message : "Not found" }); }
+});
+
+// Backs the printed order barcode (see src/ui/App.tsx's buildReceiptHtml,
+// ticketBarcodeSvg): Queue/History's "Scan order" button and POS's "Scan
+// to reorder" both decode a CODE128 barcode back to a plain ticketNumber
+// string and look it up here — deliberately not trying to encode per-item
+// weight/price data into the barcode itself (a 1D barcode's capacity gets
+// unreliable fast, and the ticket number alone is enough to fetch the
+// exact same data server-side via a live round trip). No route-ordering
+// conflict with "/:id" above despite Express matching routes in
+// registration order: "/:id" only ever matches a single path segment, and
+// "/by-ticket/<ticketNumber>" is always two, so they can never collide.
+router.get("/by-ticket/:ticketNumber", (req, res) => {
+  const order = db.getOrderByTicket(req.params.ticketNumber as string);
+  if (!order) { res.status(404).json({ message: "No order found for that ticket number" }); return; }
+  res.json(order);
 });
 
 // Adds one item to an already-created order — the "Scan barcode" button on
