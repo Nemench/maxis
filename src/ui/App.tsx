@@ -121,6 +121,13 @@ async function refreshLogoDataUri(): Promise<void> {
   if (logoDataUriFor === target && logoDataUri) return;
   try {
     const res = await fetch(assetUrl(target));
+    // A stale/deleted uploaded logo (e.g. after a restore) 404s against
+    // express.static, but the server's SPA catch-all then serves
+    // index.html for that path with a 200 — without checking res.ok AND
+    // the content-type, that HTML page would get base64-encoded and used
+    // as the <img> src, producing a permanently broken image in both the
+    // print preview and every email, not just an occasional race.
+    if (!res.ok || !(res.headers.get("content-type") ?? "").startsWith("image/")) return;
     const blob = await res.blob();
     const dataUri = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -134,6 +141,16 @@ async function refreshLogoDataUri(): Promise<void> {
     // Leave the previous cached value (possibly still null) in place —
     // buildReceiptHtml's URL fallback covers this case.
   }
+}
+
+// Callers that are about to build a receipt for something other than an
+// immediate same-device print (email in particular, where the plain-URL
+// fallback is useless to a recipient off the LAN) await this first, so a
+// slow first fetch on a freshly-loaded page can't lose the race and fall
+// back to a URL the recipient will never be able to reach.
+async function ensureLogoDataUri(): Promise<void> {
+  if (logoDataUri && logoDataUriFor === (receiptBranding.logoUrl || "/logo.jpg")) return;
+  await refreshLogoDataUri();
 }
 
 function setReceiptBranding(patch: Partial<typeof receiptBranding>) {
@@ -2854,7 +2871,12 @@ function CrmPanel() {
     </div>
   );
 
-  if (view === "email") return <div className="products-layout"><div className="panel table-panel">{tabs}<EmailSubscribersPanel /></div></div>;
+  // Both the marketing-list view and the plain contact list (no detail
+  // pane open) are a single panel — .products-layout's grid is built for
+  // the products page's narrow-form-plus-wide-list split and would squeeze
+  // a lone panel into its 340px first column, so it's only used below once
+  // a contact is actually selected and there are two columns to lay out.
+  if (view === "email") return <div className="panel table-panel">{tabs}<EmailSubscribersPanel /></div>;
 
   // Only the true "no contacts exist at all" case (no active search)
   // replaces the whole panel, matching every other list panel's EmptyState
@@ -2862,17 +2884,16 @@ function CrmPanel() {
   // nothing keeps the search box visible with an inline "no matches" row,
   // same distinction those other panels make for their own filters.
   if (!loading && contacts.length === 0 && !search) {
-    return <div className="products-layout"><div className="panel table-panel">{tabs}<EmptyState title="No contacts yet" detail="Captured automatically from POS checkout or inbound WhatsApp messages." /></div></div>;
+    return <div className="panel table-panel">{tabs}<EmptyState title="No contacts yet" detail="Captured automatically from POS checkout or inbound WhatsApp messages." /></div>;
   }
 
-  return (
-    <div className="products-layout">
-      <div className="panel table-panel">
-        {tabs}
-        <div className="crm-search">
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, phone, or tag…" />
-        </div>
-        <table>
+  const list = (
+    <div className="panel table-panel">
+      {tabs}
+      <div className="crm-search">
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, phone, or tag…" />
+      </div>
+      <table>
           <thead><tr><th>Name</th><th>Phone</th><th>Tags</th><th>Consent</th></tr></thead>
           <tbody>
             {loading && <tr><td colSpan={4} className="muted">Loading…</td></tr>}
@@ -2886,9 +2907,16 @@ function CrmPanel() {
             ))}
             {!loading && contacts.length === 0 && <tr><td colSpan={4} className="muted">No contacts match your search.</td></tr>}
           </tbody>
-        </table>
-      </div>
-      {selectedId && <CrmContactDetailPanel contactId={selectedId} onClose={() => setSelectedId(null)} onChanged={load} />}
+      </table>
+    </div>
+  );
+
+  if (!selectedId) return list;
+
+  return (
+    <div className="products-layout">
+      {list}
+      <CrmContactDetailPanel contactId={selectedId} onClose={() => setSelectedId(null)} onChanged={load} />
     </div>
   );
 }
@@ -4573,8 +4601,8 @@ tr:nth-child(even) td{background:#f8f9fc}tr:last-child td{border-bottom:none}
 .totals td:last-child{text-align:right}
 .totals .grand td{font-size:17px;font-weight:800;color:#1a1a2e;border-top:2px solid ${blueDark};padding-top:8px}
 .footer{margin-top:40px;text-align:center;color:#888;font-size:12px;border-top:1px solid #e0e6f0;padding-top:12px}
-${forEmail ? "body{max-width:480px;padding:16px;margin:0 auto}" : ""}
 </style></head><body>
+${forEmail ? '<div style="max-width:480px;margin:0 auto;padding:16px;box-sizing:border-box;">' : ""}
 <div class="hdr">
   <div class="hdr-left">
     <div class="shop">${siteName}</div>
@@ -4606,6 +4634,7 @@ ${isReceipt ? `<table class="totals"><tbody>
   ${paymentLine ? `<tr><td colspan="2">${esc(paymentLine)}</td></tr>` : ""}
 </tbody></table>` : ""}
 <div class="footer">Thank you for your order - ${siteName}</div>
+${forEmail ? "</div>" : ""}
 </body></html>`;
   }
 
@@ -4636,8 +4665,8 @@ body{font-family:'Courier New',Courier,monospace;font-size:12px;width:72mm;paddi
 .totals td:last-child{text-align:right}
 .totals .grand td{font-size:15px;font-weight:bold;border-top:1px solid #000;padding-top:4px}
 .footer{font-size:11px;color:#555}
-${forEmail ? "body{max-width:380px;padding:16px;margin:0 auto}" : ""}
 </style></head><body>
+${forEmail ? '<div style="max-width:380px;margin:0 auto;padding:16px;box-sizing:border-box;">' : ""}
 <div class="center">
   <img class="logo" src="${logoUrl}" alt="${siteName}">
   <div class="shop">${siteName}</div>
@@ -4672,6 +4701,7 @@ ${receiptBranding.vatRegistered ? `<tr><td>VAT incl. (15%)</td><td>${currency.fo
 ${paymentLine ? `<div class="center" style="font-size:11px;margin-top:4px">${esc(paymentLine)}</div>` : ""}
 <hr class="sep">` : ""}
 <div class="center footer">Thank you for your order</div>
+${forEmail ? "</div>" : ""}
 </body></html>`;
 }
 
@@ -4916,6 +4946,7 @@ async function printReceipt(order: Order, type: "kitchen" | "counter" | "master"
   const items = type === "master" ? order.items : order.items.filter((i) => i.department === type);
   if (items.length === 0) return;
 
+  await ensureLogoDataUri();
   const resolved = resolvePrintStyle(type, printStyle);
   const html = buildReceiptHtml(order, type, resolved);
 
@@ -4940,6 +4971,7 @@ function EmailReceiptModal({ order, printStyle, onClose }: { order: Order; print
     if (!trimmed) return;
     setSending(true); setResult("");
     try {
+      await ensureLogoDataUri();
       const html = buildReceiptHtml(order, "master", resolvePrintStyle("master", printStyle), true);
       await api.orders.emailReceipt(order.id, trimmed, html);
       setResult("Sent!");

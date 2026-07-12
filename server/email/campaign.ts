@@ -13,9 +13,7 @@ function escHtml(s: string): string {
 
 const EXT_MIME: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml" };
 
-function resolveLogoDataUri(logoUrl: string): string | null {
-  const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), "data");
-  const filePath = logoUrl ? path.join(dataDir, logoUrl.replace(/^\/+/, "")) : path.join(process.cwd(), "public/logo.jpg");
+function readAsDataUri(filePath: string): string | null {
   try {
     const buf = fs.readFileSync(filePath);
     const mime = EXT_MIME[path.extname(filePath).toLowerCase()] || "image/jpeg";
@@ -23,6 +21,20 @@ function resolveLogoDataUri(logoUrl: string): string | null {
   } catch {
     return null;
   }
+}
+
+// Falls back to the bundled default logo both when no custom one was ever
+// uploaded AND when the configured logoUrl points at a file that no longer
+// exists (e.g. after a restore from an older backup) — same reasoning as
+// server/email/receipt.ts's resolveLogoDataUri, kept as a separate copy
+// rather than a shared import since each caller's fallback path (data dir
+// vs bundled default) is a two-line function, not worth a shared module.
+function resolveLogoDataUri(logoUrl: string): string | null {
+  const bundledDefault = path.join(process.cwd(), "public/logo.jpg");
+  if (!logoUrl) return readAsDataUri(bundledDefault);
+  const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), "data");
+  const uploaded = readAsDataUri(path.join(dataDir, logoUrl.replace(/^\/+/, "")));
+  return uploaded ?? readAsDataUri(bundledDefault);
 }
 
 // `body` is plain text from the admin's compose box — rendered with

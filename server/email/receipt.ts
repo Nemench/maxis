@@ -22,12 +22,7 @@ const rand = (n: number) => `R${n.toFixed(2)}`;
 
 const EXT_MIME: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml" };
 
-// Mirrors scripts/sync-branding.mjs's resolution: an admin-uploaded logo
-// lives at DATA_DIR/<settings.logoUrl>, falling back to the bundled
-// default at public/logo.jpg when none has been uploaded.
-function resolveLogoDataUri(logoUrl: string): string | null {
-  const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), "data");
-  const filePath = logoUrl ? path.join(dataDir, logoUrl.replace(/^\/+/, "")) : path.join(process.cwd(), "public/logo.jpg");
+function readAsDataUri(filePath: string): string | null {
   try {
     const buf = fs.readFileSync(filePath);
     const mime = EXT_MIME[path.extname(filePath).toLowerCase()] || "image/jpeg";
@@ -35,6 +30,20 @@ function resolveLogoDataUri(logoUrl: string): string | null {
   } catch {
     return null;
   }
+}
+
+// Mirrors scripts/sync-branding.mjs's resolution: an admin-uploaded logo
+// lives at DATA_DIR/<settings.logoUrl>, falling back to the bundled
+// default at public/logo.jpg when none has been uploaded — and also
+// falling back there if the configured logoUrl points at a file that no
+// longer exists (e.g. after a restore from an older backup), rather than
+// silently sending no logo at all.
+function resolveLogoDataUri(logoUrl: string): string | null {
+  const bundledDefault = path.join(process.cwd(), "public/logo.jpg");
+  if (!logoUrl) return readAsDataUri(bundledDefault);
+  const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), "data");
+  const uploaded = readAsDataUri(path.join(dataDir, logoUrl.replace(/^\/+/, "")));
+  return uploaded ?? readAsDataUri(bundledDefault);
 }
 
 export function buildSimpleReceiptHtml(order: Order, settings: Record<string, string>): string {
