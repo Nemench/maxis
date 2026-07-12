@@ -37,6 +37,7 @@ import {
   Settings,
   ShoppingCart,
   Sun,
+  Tag,
   Trash2,
   Users,
   Weight,
@@ -72,7 +73,9 @@ import type {
   CrmContactDetail,
   CrmMessage,
   ConsentStatus,
-  EmailSubscriber
+  EmailSubscriber,
+  LabelFormat,
+  LabelData
 } from "../shared/types";
 import { api, assetUrl } from "./api";
 import { useBarcodeScan } from "./useBarcodeScan";
@@ -80,7 +83,7 @@ import { iconSwitcher, type IconVariant } from "./iconSwitcher";
 import { applyTheme, applyThemeMode, deriveShades, initThemeMode, ThemeMode } from "./theme";
 import { tokenStorage } from "./tokenStorage";
 
-type Tab = "orders" | "pos" | "queue" | "history" | "products" | "users" | "settings" | "reports" | "weighIn" | "statistics" | "crm" | "consolidate";
+type Tab = "orders" | "pos" | "queue" | "history" | "products" | "users" | "settings" | "reports" | "weighIn" | "statistics" | "crm" | "consolidate" | "printLabels";
 
 // Applied at module load (before React's first render) so there's no flash
 // of the wrong theme — reads the stored preference (or system default).
@@ -436,6 +439,9 @@ function MainApp({ currentUser, onLogout, branding, onBrandingChange, themeMode,
               {(currentUser.role === "kitchen" || currentUser.role === "counter" || currentUser.role === "cashier" || currentUser.role === "admin") && (
                 <button className={tab === "consolidate" ? "active" : ""} onClick={() => setTab("consolidate")}><ScanLine size={18} /><span>Consolidate</span></button>
               )}
+              {(currentUser.role === "counter" || currentUser.role === "admin") && (
+                <button className={tab === "printLabels" ? "active" : ""} onClick={() => setTab("printLabels")}><Tag size={18} /><span>Print Labels</span></button>
+              )}
               {currentUser.role === "admin" && (
                 <button className={tab === "products" ? "active" : ""} onClick={() => setTab("products")}>
                   <Package size={18} /><span>Stock</span>
@@ -517,6 +523,7 @@ function MainApp({ currentUser, onLogout, branding, onBrandingChange, themeMode,
         {tab === "consolidate" && (currentUser.role === "kitchen" || currentUser.role === "counter" || currentUser.role === "cashier" || currentUser.role === "admin") && (
           <ConsolidationPanel printStyle={printStyle} printerMap={printerMap} />
         )}
+        {tab === "printLabels" && (currentUser.role === "counter" || currentUser.role === "admin") && <PrintLabelsPanel products={products} />}
         {tab === "products" && (currentUser.role === "admin" || isStockTaker) && <StockPanel products={products} currentUser={currentUser} onChanged={refresh} />}
         {tab === "weighIn" && (currentUser.role === "admin" || isStockTaker) && <WeighInPanel products={products} currentUser={currentUser} onChanged={refresh} />}
         {tab === "users" && currentUser.role === "admin" && <UsersPanel />}
@@ -1943,6 +1950,152 @@ function ConsolidationPanel({ printStyle, printerMap }: { printStyle: string; pr
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ── Print Labels ──────────────────────────────────────────────────────────────
+
+const LAST_LABEL_FORMAT_KEY = "nemenchpos-last-label-format";
+
+// Pick a product, enter its weight (if it's sold by weight) and a
+// quantity, choose a format, and print — a live preview (see
+// LabelPreview) reflects every change instantly since it's just a normal
+// React re-render, no separate "preview" step. See buildThermalPrintHtml/
+// buildA4SheetHtml for the actual print output these preview from.
+function PrintLabelsPanel({ products }: { products: Product[] }) {
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState<Product | null>(null);
+  const [weightKg, setWeightKg] = useState("");
+  const [quantity, setQuantity] = useState(1);
+  const [formats, setFormats] = useState<LabelFormat[]>([]);
+  const [formatId, setFormatId] = useState("");
+  const [startPosition, setStartPosition] = useState(1);
+  const [printing, setPrinting] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    api.labels.formats().then((list) => {
+      setFormats(list);
+      const remembered = localStorage.getItem(LAST_LABEL_FORMAT_KEY);
+      const initial = list.find((f) => f.id === remembered) ?? list[0];
+      if (initial) setFormatId(initial.id);
+    }).catch(() => undefined);
+  }, []);
+
+  const matches = useMemo(() => {
+    if (!search.trim()) return [];
+    const q = search.trim().toLowerCase();
+    return products.filter((p) => p.name.toLowerCase().includes(q) || (p.barcode ?? "").includes(q)).slice(0, 20);
+  }, [products, search]);
+
+  const selectProduct = (p: Product) => {
+    setSelected(p);
+    setSearch("");
+    setWeightKg("");
+    setMessage("");
+  };
+
+  const format = formats.find((f) => f.id === formatId) ?? null;
+  const isWeighed = selected ? selected.unitDefault !== "qty" : false;
+
+  const data: LabelData | null = selected ? {
+    name: selected.name,
+    barcode: selected.barcode ?? "",
+    pricePerUnit: selected.pricePerUnit,
+    unitDefault: selected.unitDefault,
+    weightKg: isWeighed && weightKg ? Number(weightKg) : null
+  } : null;
+
+  const changeFormat = (id: string) => {
+    setFormatId(id);
+    setStartPosition(1);
+    localStorage.setItem(LAST_LABEL_FORMAT_KEY, id);
+  };
+
+  const perSheet = format?.type === "a4_sheet" && format.sheetCols && format.sheetRows ? format.sheetCols * format.sheetRows : 0;
+
+  const print = () => {
+    if (!data || !format) return;
+    if (!selected?.barcode) { setMessage("This product has no barcode yet — add one in Stock before printing labels for it."); return; }
+    if (isWeighed && !weightKg) { setMessage("Enter the weighed amount first."); return; }
+    setPrinting(true); setMessage("");
+    try {
+      const html = format.type === "thermal"
+        ? buildThermalPrintHtml(data, format, quantity)
+        : buildA4SheetHtml(data, format, quantity, startPosition);
+      printHtml(html);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not build the label print job.");
+    } finally {
+      setPrinting(false);
+    }
+  };
+
+  return (
+    <div className="products-layout">
+      <div className="panel">
+        <h2>Print Labels</h2>
+        {!selected ? (
+          <>
+            <input placeholder="Search products by name or barcode…" value={search} onChange={(e) => setSearch(e.target.value)} autoFocus />
+            {matches.length > 0 && (
+              <div className="print-labels-matches">
+                {matches.map((p) => (
+                  <button type="button" key={p.id} className="secondary" onClick={() => selectProduct(p)}>
+                    {p.name} {p.barcode ? <span className="muted">({p.barcode})</span> : <span className="muted">(no barcode)</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+            {search.trim() && matches.length === 0 && <p className="settings-hint">No products match.</p>}
+          </>
+        ) : (
+          <>
+            <div className="setting-row">
+              <div className="setting-info">
+                <strong>{selected.name}</strong>
+                <p>{selected.pricePerUnit != null ? `${currency.format(selected.pricePerUnit)}${isWeighed ? "/kg" : ""}` : "No price set"} - {selected.barcode || "No barcode"}</p>
+              </div>
+              <button type="button" className="secondary" onClick={() => setSelected(null)}>Change product</button>
+            </div>
+
+            {isWeighed && (
+              <label>Weighed amount (kg)
+                <input type="number" min="0" step="0.001" value={weightKg} onChange={(e) => setWeightKg(e.target.value)} placeholder="e.g. 0.845" autoFocus />
+              </label>
+            )}
+
+            <label>Quantity
+              <input type="number" min="1" max="5000" value={quantity} onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))} />
+            </label>
+
+            <label>Label format
+              <select value={formatId} onChange={(e) => changeFormat(e.target.value)}>
+                {formats.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+              </select>
+            </label>
+
+            {format?.type === "a4_sheet" && perSheet > 0 && (
+              <label>Start position on sheet <span className="optional-hint">(1 = top-left; use this to reuse a partially-used sheet)</span>
+                <input type="number" min="1" max={perSheet} value={startPosition} onChange={(e) => setStartPosition(Math.min(perSheet, Math.max(1, Number(e.target.value) || 1)))} />
+              </label>
+            )}
+
+            {message && <p className="form-error">{message}</p>}
+
+            <footer className="actions">
+              <button type="button" disabled={printing || !format || (isWeighed && !weightKg)} onClick={print}>
+                <Printer size={16} /> {printing ? "Printing…" : "Print labels"}
+              </button>
+            </footer>
+          </>
+        )}
+      </div>
+
+      {selected && data && format && (
+        <LabelPreview data={data} format={format} quantity={quantity} startPosition={startPosition} />
+      )}
     </div>
   );
 }
@@ -5339,6 +5492,147 @@ svg{width:100%;max-height:${svgMax}mm}
 </style></head><body>${pages}</body></html>`;
 }
 
+// ── Print Labels (DB-driven format presets) ──────────────────────────────────
+// Distinct from buildBarcodeStickerHtml/LabelPrefs above (the Stock panel's
+// quick single-sticker reprint, fixed to 3 hardcoded sizes) — this is the
+// fuller "Print Labels" tab: DB-configurable formats (thermal AND A4 sheet
+// grids), a weighed-price field, and a live on-screen preview that reuses
+// this exact HTML (see LabelPreview) rather than a parallel React
+// re-implementation that could drift from what actually prints.
+
+const LABEL_CELL_STYLE = `
+.label{box-sizing:border-box;padding:1.5mm;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;overflow:hidden;font-family:Inter,Arial,sans-serif}
+.lname{font-size:9px;font-weight:700;line-height:1.15;max-height:22px;overflow:hidden}
+.lweight{font-size:7px;color:#444;margin-top:0.3mm}
+.lprice{font-size:11px;font-weight:800;margin-top:0.5mm}
+.label svg{width:100%;max-height:40%}`;
+
+// The visual content of ONE label — shared by the thermal renderer (one
+// per page), the A4 grid renderer (one per cell), and the live preview's
+// zoomed single-label view, so all three can never visually disagree.
+function buildLabelCellHtml(data: LabelData, widthMm: number, heightMm: number): string {
+  const barcodeSvg = data.barcode ? renderBarcodeSvgMarkup(data.barcode, "EAN13", { height: Math.max(10, heightMm * 0.5), margin: 0, displayValue: true }) : "";
+  // unitDefault === "qty" is fixed-unit/each; "kg" and "kg_qty" are both
+  // weight-priced — same distinction POS's own product tiles already use.
+  const isWeighed = data.unitDefault !== "qty";
+  // A weighed item's label shows the actual price for THIS portion (rate
+  // x entered weight) — what a real deli label shows a customer — not
+  // just the per-kg rate. Falls back to the plain rate if no weight has
+  // been entered yet (e.g. while the staff member is still filling in the form).
+  const priceLine = isWeighed
+    ? (data.pricePerUnit != null && data.weightKg != null ? currency.format(data.pricePerUnit * data.weightKg) : data.pricePerUnit != null ? `${currency.format(data.pricePerUnit)}/kg` : "")
+    : (data.pricePerUnit != null ? currency.format(data.pricePerUnit) : "");
+  const weightLine = isWeighed && data.weightKg != null && data.pricePerUnit != null ? `${data.weightKg.toFixed(3)} kg @ ${currency.format(data.pricePerUnit)}/kg` : "";
+
+  return `<div class="label" style="width:${widthMm}mm;height:${heightMm}mm">
+    <div class="lname">${esc(data.name)}</div>
+    ${weightLine ? `<div class="lweight">${esc(weightLine)}</div>` : ""}
+    ${priceLine ? `<div class="lprice">${esc(priceLine)}</div>` : ""}
+    ${barcodeSvg}
+  </div>`;
+}
+
+// Thermal: one label per physical print, repeated `copies` times on
+// successive forced page-breaks — correct for a continuous roll (each
+// break advances one label) and equally fine on a cut-sheet printer. Also
+// used (with copies=1) for the live preview's zoomed single-label view,
+// regardless of which format type is actually selected — a single cell's
+// own dimensions are exactly widthMm/heightMm either way.
+function buildThermalPrintHtml(data: LabelData, format: LabelFormat, copies: number): string {
+  const n = Math.min(Math.max(1, Math.round(copies) || 1), 500);
+  const cell = buildLabelCellHtml(data, format.widthMm, format.heightMm);
+  const pages = Array.from({ length: n }, (_, i) => (i === 0 ? cell : `<div style="page-break-before:always">${cell}</div>`)).join("");
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(data.name)} label</title><style>
+@page{size:${format.widthMm}mm ${format.heightMm}mm;margin:0}*{box-sizing:border-box;margin:0;padding:0}
+body{background:#fff;color:#000}
+${LABEL_CELL_STYLE}
+</style></head><body>${pages}</body></html>`;
+}
+
+// A4 sheet: labels fill a fixed rows x cols grid per page, in reading
+// order (left-to-right, top-to-bottom). `startPosition` (1-based) skips
+// that many leading cells on the FIRST sheet only, so a partially-used
+// sheet can be reused rather than wasting its already-blank labels.
+// Renders every sheet needed to fit `quantity` labels starting from that
+// position, one sheet per printed page.
+function buildA4SheetHtml(data: LabelData, format: LabelFormat, quantity: number, startPosition: number): string {
+  if (format.type !== "a4_sheet" || !format.sheetCols || !format.sheetRows) {
+    throw new Error("buildA4SheetHtml requires an a4_sheet format with sheetCols/sheetRows set");
+  }
+  const perSheet = format.sheetCols * format.sheetRows;
+  const skip = Math.min(Math.max(0, Math.round(startPosition) - 1), perSheet - 1);
+  const n = Math.min(Math.max(1, Math.round(quantity) || 1), 5000);
+  const sheets = Math.ceil((skip + n) / perSheet);
+  const cell = buildLabelCellHtml(data, format.widthMm, format.heightMm);
+  const gapX = format.gapXMm ?? 0;
+  const gapY = format.gapYMm ?? 0;
+
+  let placed = 0;
+  const pages: string[] = [];
+  for (let s = 0; s < sheets; s++) {
+    const cells: string[] = [];
+    for (let pos = 0; pos < perSheet; pos++) {
+      const isSkipped = s === 0 && pos < skip;
+      const isFilled = !isSkipped && placed < n;
+      cells.push(isFilled ? cell : `<div class="label-empty"></div>`);
+      if (isFilled) placed++;
+    }
+    pages.push(`<div class="sheet"${s > 0 ? ' style="page-break-before:always"' : ""}>${cells.join("")}</div>`);
+  }
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(data.name)} labels (${n})</title><style>
+@page{size:A4;margin:0}*{box-sizing:border-box;margin:0;padding:0}
+body{background:#fff;color:#000}
+.sheet{width:210mm;height:297mm;padding:${format.marginTopMm}mm 0 0 ${format.marginLeftMm}mm;display:grid;grid-template-columns:repeat(${format.sheetCols},${format.widthMm}mm);grid-template-rows:repeat(${format.sheetRows},${format.heightMm}mm);column-gap:${gapX}mm;row-gap:${gapY}mm}
+.label-empty{width:${format.widthMm}mm;height:${format.heightMm}mm}
+${LABEL_CELL_STYLE}
+</style></head><body>${pages.join("")}</body></html>`;
+}
+
+// Reuses the exact same HTML the print button will send — an iframe
+// showing real generated markup, not a parallel React re-implementation
+// that could drift from what actually prints. Two views: a zoomed single
+// label (always), and for a4_sheet formats, the first sheet's full grid
+// (enough to verify alignment/start-position skipping without rendering
+// every page of a large run into hidden iframes).
+function LabelPreview({ data, format, quantity, startPosition }: { data: LabelData; format: LabelFormat; quantity: number; startPosition: number }) {
+  const singleHtml = useMemo(() => buildThermalPrintHtml(data, format, 1), [data, format]);
+
+  const perSheet = format.type === "a4_sheet" && format.sheetCols && format.sheetRows ? format.sheetCols * format.sheetRows : 1;
+  const sheetsNeeded = format.type === "a4_sheet" ? Math.ceil((Math.max(0, startPosition - 1) + Math.max(1, quantity)) / perSheet) : Math.max(1, quantity);
+
+  const sheetHtml = useMemo(() => {
+    if (format.type !== "a4_sheet") return "";
+    // Only render enough labels to fill page 1 — the preview only ever
+    // shows that page, so there's no reason to build (and hide) HTML for
+    // sheets 2..N of a large run.
+    const page1Quantity = Math.min(Math.max(1, quantity), perSheet);
+    return buildA4SheetHtml(data, format, page1Quantity, startPosition);
+  }, [data, format, quantity, startPosition, perSheet]);
+
+  return (
+    <div className="panel label-preview">
+      <div className="label-preview-single">
+        <h3>Single label</h3>
+        <div className="label-preview-frame" style={{ aspectRatio: `${format.widthMm} / ${format.heightMm}` }}>
+          <iframe title="Label preview" srcDoc={singleHtml} />
+        </div>
+      </div>
+      {format.type === "a4_sheet" && (
+        <div className="label-preview-sheet">
+          <h3>Sheet layout (page 1 of {sheetsNeeded})</h3>
+          <div className="label-preview-frame label-preview-frame-a4">
+            <iframe title="Sheet preview" srcDoc={sheetHtml} />
+          </div>
+        </div>
+      )}
+      <p className="settings-hint">
+        {quantity} label{quantity === 1 ? "" : "s"}{format.type === "a4_sheet" ? ` = ${sheetsNeeded} sheet${sheetsNeeded === 1 ? "" : "s"}` : ""}
+      </p>
+    </div>
+  );
+}
+
 // Opens a built HTML document for printing. Three paths:
 // - Native Android app: an in-app overlay (see showInAppPrintPreview) —
 //   window.open() there would launch a separate browser activity outside
@@ -5610,7 +5904,7 @@ function calculateLineTotal(item: OrderItemInput) {
 }
 
 function tabTitle(tab: Tab) {
-  return { orders: "New Order", pos: "POS", queue: "Prep Queue", history: "Order History", products: "Stock", users: "Users", settings: "Settings", reports: "Reports", weighIn: "Weigh-In", statistics: "Statistics", crm: "CRM", consolidate: "Consolidate Order" }[tab];
+  return { orders: "New Order", pos: "POS", queue: "Prep Queue", history: "Order History", products: "Stock", users: "Users", settings: "Settings", reports: "Reports", weighIn: "Weigh-In", statistics: "Statistics", crm: "CRM", consolidate: "Consolidate Order", printLabels: "Print Labels" }[tab];
 }
 
 function tabSubtitle(tab: Tab) {
@@ -5626,6 +5920,7 @@ function tabSubtitle(tab: Tab) {
     weighIn: "Log received stock by weight, batch by batch.",
     statistics: "Sales performance and stock movement per item.",
     crm: "Contacts, message history, and WhatsApp automation.",
-    consolidate: "Scan every item to verify a Ready order, then finalize one barcode and receipt for it."
+    consolidate: "Scan every item to verify a Ready order, then finalize one barcode and receipt for it.",
+    printLabels: "Pick a product, set weight/quantity/format, and print with a live preview."
   }[tab];
 }

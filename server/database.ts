@@ -17,7 +17,7 @@ import type {
   StockLocation, ProductStockRow, ItemSalesStat, ItemStockMovementStat, StatisticsOverview,
   MarginStat, MarginOverview, YieldEstimate, YieldEstimateInput, PendingYieldConversion, PendingYieldItem,
   CrmContact, CrmContactInput, CrmMessage, MessageDirection, MessageType, MessageStatus,
-  WhatsappOutboxItem, CrmAutomationRule, ConsentStatus, CrmContactDetail, CrmTag, EmailOutboxItem, EmailSubscriber, OrderMessageTemplate
+  WhatsappOutboxItem, CrmAutomationRule, ConsentStatus, CrmContactDetail, CrmTag, EmailOutboxItem, EmailSubscriber, OrderMessageTemplate, LabelFormat
 } from "../src/shared/types.js";
 import { generateInternalBarcode } from "../src/shared/internalBarcode.js";
 import { generateConsolidationBarcode } from "../src/shared/orderConsolidationBarcode.js";
@@ -708,7 +708,7 @@ export class KotDatabase {
     "products", "crm_contact_tags", "crm_messages", "whatsapp_outbox", "crm_automation_rules",
     "orders", "order_items", "weigh_in_batches", "weigh_in_lines",
     "product_cost_history", "product_yield_estimates", "pending_yield_conversions", "pending_yield_items",
-    "product_stock", "email_outbox", "email_subscribers", "order_message_templates"
+    "product_stock", "email_outbox", "email_subscribers", "order_message_templates", "label_formats"
   ];
 
   private tableColumns(table: string): string[] {
@@ -1669,6 +1669,29 @@ export class KotDatabase {
         updated_at TEXT NOT NULL
       );
 
+      -- ── Label format presets ─────────────────────────────────────────────
+      -- Config for the "Print Labels" tab's two renderers (thermal
+      -- single-label, a4_sheet grid) — physical dimensions in mm, not
+      -- hardcoded in the client, so a format can be corrected/added
+      -- without a code change. sheetCols through gapYMm are only
+      -- meaningful for type='a4_sheet' (null for 'thermal', which is
+      -- always exactly one label per physical print).
+      CREATE TABLE IF NOT EXISTS label_formats (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        widthMm REAL NOT NULL,
+        heightMm REAL NOT NULL,
+        sheetCols INTEGER,
+        sheetRows INTEGER,
+        marginTopMm REAL,
+        marginLeftMm REAL,
+        gapXMm REAL,
+        gapYMm REAL,
+        sortOrder INTEGER NOT NULL DEFAULT 0,
+        createdAt TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_crm_contacts_phone ON crm_contacts(phone_number);
       CREATE INDEX IF NOT EXISTS idx_crm_messages_contact ON crm_messages(contact_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_email_outbox_status ON email_outbox(status);
@@ -1877,6 +1900,29 @@ export class KotDatabase {
         "Hi {customer_name}, your order from {business_name} is on its way!\n\nOrder #{order_number}\nTotal due: R{amount} - Pay on delivery\n\n🚚 Estimated arrival: {eta}\n📍 Delivering to: {delivery_address}\n\nHave your payment ready for the driver."]
     ]) {
       seedOrderMessageTemplate.run(id, fulfillmentType, paymentStatus, body, nowIso);
+    }
+
+    // Seed default label formats — INSERT OR IGNORE against the primary
+    // key, same idempotent-on-every-boot pattern as order_message_templates
+    // just above, so this backfills existing installs without clobbering
+    // an admin's own edits. The three "a4_XX" presets are standard,
+    // widely-published Avery A4 label dimensions (L7160/L7159/L7651-
+    // equivalent) — not verifiable against real physical output in this
+    // environment, so print one test sheet against actual stock before a
+    // bulk run and nudge marginTopMm/marginLeftMm if it's off by a mm or
+    // two, same caveat that applies to any label-template software.
+    const seedLabelFormat = this.db.prepare(
+      "INSERT OR IGNORE INTO label_formats (id, name, type, widthMm, heightMm, sheetCols, sheetRows, marginTopMm, marginLeftMm, gapXMm, gapYMm, sortOrder, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    );
+    for (const f of [
+      { id: "thermal_40x30", name: "Thermal 40 x 30mm",   type: "thermal",  w: 40,   h: 30,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 0 },
+      { id: "thermal_50x30", name: "Thermal 50 x 30mm",   type: "thermal",  w: 50,   h: 30,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 1 },
+      { id: "thermal_58x40", name: "Thermal 58 x 40mm",   type: "thermal",  w: 58,   h: 40,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 2 },
+      { id: "a4_21",         name: "A4 sheet - 21/sheet", type: "a4_sheet", w: 63.5, h: 38.1, cols: 3,    rows: 7,    mt: 15.15, ml: 7.2,  gx: 2.5,  gy: 0,    sort: 3 },
+      { id: "a4_24",         name: "A4 sheet - 24/sheet", type: "a4_sheet", w: 63.5, h: 33.9, cols: 3,    rows: 8,    mt: 13.5,  ml: 7.2,  gx: 2.5,  gy: 0,    sort: 4 },
+      { id: "a4_65",         name: "A4 sheet - 65/sheet", type: "a4_sheet", w: 38.1, h: 21.2, cols: 5,    rows: 13,   mt: 15.1,  ml: 4.8,  gx: 2.5,  gy: 0,    sort: 5 }
+    ]) {
+      seedLabelFormat.run(f.id, f.name, f.type, f.w, f.h, f.cols, f.rows, f.mt, f.ml, f.gx, f.gy, f.sort, nowIso);
     }
   }
 
@@ -2324,6 +2370,14 @@ export class KotDatabase {
       .prepare("SELECT id, fulfillment_type as fulfillmentType, payment_status as paymentStatus, body, updated_at as updatedAt FROM order_message_templates WHERE id = ?")
       .get(id) as OrderMessageTemplate | undefined;
     return row ?? null;
+  }
+
+  // ── Label format presets ──────────────────────────────────────────────────
+  // See the label_formats schema comment (migrate()) for what these are.
+  listLabelFormats(): LabelFormat[] {
+    return this.db
+      .prepare("SELECT id, name, type, widthMm, heightMm, sheetCols, sheetRows, marginTopMm, marginLeftMm, gapXMm, gapYMm FROM label_formats ORDER BY sortOrder ASC")
+      .all() as LabelFormat[];
   }
 
   // Populates a brand-new database with a default admin login (Admin/0000

@@ -490,6 +490,37 @@ export interface OrderMessageTemplate {
   updatedAt: string;
 }
 
+// Config for the "Print Labels" tab (see App.tsx's buildLabelCellHtml/
+// buildThermalPrintHtml/buildA4SheetHtml) — a physical label size/grid
+// preset, editable without a code change. sheetCols..gapYMm are only
+// meaningful for type: "a4_sheet" (always null for "thermal").
+export interface LabelFormat {
+  id: string;
+  name: string;
+  type: "thermal" | "a4_sheet";
+  widthMm: number;
+  heightMm: number;
+  sheetCols: number | null;
+  sheetRows: number | null;
+  marginTopMm: number | null;
+  marginLeftMm: number | null;
+  gapXMm: number | null;
+  gapYMm: number | null;
+}
+
+// Input to the label renderers — resolved from a Product plus whatever
+// the staff member entered (weight, if the product is sold by weight).
+// unitDefault === "qty" means fixed-unit/each; "kg" and "kg_qty" both mean
+// weight-priced — same distinction POS's own product tiles already use
+// (see POSPanel's addToCart/pos-product-price).
+export interface LabelData {
+  name: string;
+  barcode: string;
+  pricePerUnit: number | null;
+  unitDefault: UnitDefault;
+  weightKg: number | null;
+}
+
 export interface EmailSubscriber {
   id: string;
   name: string | null;
