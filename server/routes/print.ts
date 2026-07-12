@@ -61,7 +61,14 @@ function resolveChromeBinary(): string | null {
 
 router.post("/", (req, res) => {
   const { printerName, html } = req.body as { printerName: string; html: string };
+  // This route previously had no logging at all — a failed print left
+  // zero trace in `journalctl -u nemenchpos`, indistinguishable from the
+  // request never having arrived. Every branch below now logs, so a live
+  // print problem is diagnosable from the server's own log without
+  // needing to reproduce it through a debugger.
+  console.log(`[print] request: printer="${printerName}" htmlLength=${html?.length ?? 0}`);
   if (!printerName || !html) {
+    console.error(`[print] rejected: missing printerName or html`);
     res.status(400).json({ message: "printerName and html are required" });
     return;
   }
@@ -75,6 +82,7 @@ router.post("/", (req, res) => {
     : /^[\w.@-]+$/.test(printerName);
 
   if (!validPrinter) {
+    console.error(`[print] rejected: invalid printer name "${printerName}"`);
     res.status(400).json({ message: "Invalid printer name" });
     return;
   }
@@ -146,10 +154,12 @@ router.post("/", (req, res) => {
 
   const chromeBin = resolveChromeBinary();
   if (!chromeBin) {
+    console.error(`[print] no Chrome/Chromium binary found (tried CHROME_BIN, google-chrome-stable, google-chrome, chromium-browser, chromium)`);
     try { unlinkSync(tmpFile); } catch { /* ignore */ }
     res.status(500).json({ message: "Could not print: no Chrome/Chromium binary found on this server. Install Google Chrome (see README) or set CHROME_BIN to its path, then restart the service." });
     return;
   }
+  console.log(`[print] using Chrome binary: ${chromeBin}`);
 
   const pdfFile = tmpFile.replace(/\.html$/, ".pdf");
   const cleanup = () => { for (const f of [tmpFile, pdfFile]) { try { unlinkSync(f); } catch { /* ignore */ } } };
@@ -167,16 +177,20 @@ router.post("/", (req, res) => {
     { timeout: 20_000 },
     (renderErr) => {
       if (renderErr) {
+        console.error(`[print] Chrome PDF render failed: ${renderErr.message}`);
         cleanup();
         res.status(500).json({ message: `Could not render receipt to PDF: ${renderErr.message}` });
         return;
       }
+      console.log(`[print] PDF rendered OK, sending to lp -d "${printerName}"`);
 
-      execFile("lp", ["-d", printerName, pdfFile], { timeout: 10_000 }, (printErr) => {
+      execFile("lp", ["-d", printerName, pdfFile], { timeout: 10_000 }, (printErr, stdout, stderr) => {
         cleanup();
         if (printErr) {
+          console.error(`[print] lp failed: ${printErr.message}${stderr ? ` | stderr: ${stderr}` : ""}`);
           res.status(500).json({ message: `lp failed: ${printErr.message}` });
         } else {
+          console.log(`[print] lp accepted the job: ${stdout.trim()}`);
           res.json({ ok: true });
         }
       });
