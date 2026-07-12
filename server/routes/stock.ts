@@ -20,7 +20,13 @@ router.get("/low", (_req, res) => { res.json(db.listLowStock()); });
 // Every active product's quantity at one location — what the Stock Take
 // screen actually displays and counts against.
 router.get("/location/:locationId", (req, res) => {
-  res.json(db.listProductStockForLocation(Number(req.params.locationId)));
+  const locationId = Number(req.params.locationId);
+  if (!Number.isInteger(locationId) || locationId <= 0) { res.status(400).json({ message: "Invalid locationId" }); return; }
+  try {
+    res.json(db.listProductStockForLocation(locationId));
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : "Failed to load stock" });
+  }
 });
 
 // Records a physical count at a location. There is deliberately no "just

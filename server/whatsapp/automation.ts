@@ -1,10 +1,11 @@
 // Fires an automated WhatsApp notification for a business event (order
-// ready, payment received, ...). Called from wherever that event actually
-// happens in the app (see server/database.ts's updateDeptStatus and
-// server/routes/pos.ts's completeImmediately path) — this module only
-// decides whether a message is allowed and queues it; it never sends
-// synchronously (that's server/whatsapp/outboxWorker.ts's job), so a slow
-// or unreachable Meta API can never block the order flow that triggered it.
+// ready, payment received, ...). Called from server/routes/orders.ts —
+// order_ready on the transition into "Ready" (dept-status/status PATCH
+// handlers), payment_received on a completeImmediately (POS) order's
+// creation — this module only decides whether a message is allowed and
+// queues it; it never sends synchronously (that's
+// server/whatsapp/outboxWorker.ts's job), so a slow or unreachable Meta
+// API can never block the order flow that triggered it.
 import { db } from "../index.js";
 import { getTemplate, renderTemplateBody } from "./templates.js";
 

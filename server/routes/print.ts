@@ -40,7 +40,7 @@ router.post("/", (req, res) => {
   // ── Windows ────────────────────────────────────────────────────────────────
   if (process.platform === "win32") {
     // Inject window.print() if the HTML doesn't already trigger it.
-    const autoprint = `<script>window.addEventListener('load',function(){window.print();});<\/script>`;
+    const autoprint = `<script>window.addEventListener('load',function(){window.print();});</script>`;
     let printable: string;
     if (html.includes("window.print()")) {
       printable = html;

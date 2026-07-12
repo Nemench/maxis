@@ -2,12 +2,11 @@
 // handshake. Mounted PUBLIC (no requireAuth) at /api/whatsapp/webhook —
 // Meta calls this directly, it can't send a session cookie or API key.
 // Authenticity instead comes from (a) the GET verify-token check on setup,
-// and (b) PLUG IN REAL VALUES: for production you should also verify the
-// `X-Hub-Signature-256` header against WHATSAPP_APP_SECRET (Meta signs
-// every POST body with HMAC-SHA256) — not yet implemented here; see the
-// TODO below. Without it, this endpoint currently trusts any POST body
-// shaped like a WhatsApp payload.
+// and (b) verifying the `X-Hub-Signature-256` header against
+// WHATSAPP_APP_SECRET on every inbound POST (see verifyMetaSignature below).
+import type { Request } from "express";
 import { Router } from "express";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { db } from "../index.js";
 
 const router = Router();
@@ -18,13 +17,34 @@ const router = Router();
 // request, and this must match exactly or the subscription will fail.
 const VERIFY_TOKEN = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ?? "";
 
-// TODO PLUG IN REAL VALUES: WHATSAPP_APP_SECRET — used to verify the
-// X-Hub-Signature-256 header on every inbound POST (HMAC-SHA256 of the raw
-// body, compared with crypto.timingSafeEqual). Not implemented yet because
-// it requires switching this route's body parsing from express.json() to a
-// raw-body verifier before JSON parsing — flagged here rather than done
-// silently wrong. Until this is added, treat this endpoint as verifying
-// only who *can reach* it (network/firewall), not who *sent* each request.
+// PLUG IN REAL VALUES: from Meta App Dashboard > Settings > Basic. Used to
+// verify the X-Hub-Signature-256 header Meta signs every POST body with
+// (HMAC-SHA256 of the exact raw bytes — see server/index.ts's express.json
+// `verify` callback, which stashes those raw bytes onto req.rawBody since
+// re-serializing the parsed JSON would never byte-for-byte match what Meta
+// actually signed). If unset, every inbound POST is still processed (so a
+// fresh install works before Meta is configured) but with a loud warning —
+// this endpoint is then trusting *anyone* who can reach it, not just Meta.
+const APP_SECRET = process.env.WHATSAPP_APP_SECRET ?? "";
+let warnedMissingSecret = false;
+
+function verifyMetaSignature(req: Request): boolean {
+  if (!APP_SECRET) {
+    if (!warnedMissingSecret) {
+      console.warn("[whatsapp-webhook] WHATSAPP_APP_SECRET is not set — inbound webhook signature is NOT being verified. Anyone who can reach this endpoint can inject messages.");
+      warnedMissingSecret = true;
+    }
+    return true;
+  }
+  const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+  const header = req.header("x-hub-signature-256");
+  if (!rawBody || !header?.startsWith("sha256=")) return false;
+  const expected = createHmac("sha256", APP_SECRET).update(rawBody).digest("hex");
+  const provided = header.slice("sha256=".length);
+  const expectedBuf = Buffer.from(expected, "hex");
+  const providedBuf = Buffer.from(provided, "hex");
+  return expectedBuf.length === providedBuf.length && timingSafeEqual(expectedBuf, providedBuf);
+}
 
 // Meta's one-time subscription verification handshake.
 router.get("/webhook", (req, res) => {
@@ -41,6 +61,11 @@ router.get("/webhook", (req, res) => {
 // Inbound message delivery. Meta's payload shape (WhatsApp Cloud API
 // webhook, `messages` field): entry[].changes[].value.{contacts[],messages[]}.
 router.post("/webhook", (req, res) => {
+  if (!verifyMetaSignature(req)) {
+    console.warn("[whatsapp-webhook] rejected POST with missing/invalid X-Hub-Signature-256");
+    res.sendStatus(403);
+    return;
+  }
   // Acknowledge immediately — Meta expects a fast 200 and will retry/
   // disable the webhook on repeated timeouts; do the work synchronously
   // here since it's cheap (a couple of sqlite writes), but respond first

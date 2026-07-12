@@ -2164,6 +2164,11 @@ button.sm {
   font-weight: 400;
 }
 
+.pos-customer-number-warning {
+  color: var(--red);
+  margin: 4px 0 0;
+}
+
 .pos-payment-section {
   display: flex;
   flex-direction: column;

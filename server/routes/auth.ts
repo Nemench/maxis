@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import { db } from "../index.js";
 import { signToken, requireAuth } from "../auth.js";
 import type { AuthRequest } from "../auth.js";
+import type { User } from "../../src/shared/types.js";
 
 const router = Router();
 
@@ -40,8 +41,14 @@ router.post("/login", (req, res) => {
   // Clear rate limit counter on successful login
   loginAttempts.delete(ip);
 
-  // Never send the hashed PIN back to the client.
-  const { pin: _pin, ...safeUser } = user;
+  // Built explicitly (not via destructure-and-discard) so a new sensitive
+  // column added to the users table later doesn't silently leak here by
+  // just not being excluded — only fields on the public User shape ever
+  // go out.
+  const safeUser: User = {
+    id: user.id, name: user.name, role: user.role, department: user.department,
+    isActive: user.isActive, createdAt: user.createdAt, lastSeenAt: user.lastSeenAt, themeMode: user.themeMode
+  };
   res.json({ token: signToken(safeUser), user: safeUser });
 });
 

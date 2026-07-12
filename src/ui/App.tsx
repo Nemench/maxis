@@ -1,13 +1,17 @@
 // Single-file React SPA for the whole client UI. One component per screen/
-// panel (Login, OrderEntry, Queue, HistoryView, StockPanel (Products +
-// StockTakePanel), WeighInPanel, UsersPanel, SettingsPanel, ReportsPanel), switched by the
-// `tab` state in MainApp and gated per-role both here (nav visibility) and
-// on the server (route middleware) — client-side gating is a UX nicety,
-// never the actual security boundary. Printing (buildReceiptHtml /
-// buildWeighInSummaryHtml / printHtml) lives at the bottom as plain
-// functions, not components, since they build a full standalone HTML
-// document string for a separate print tab/iframe rather than rendering
-// into this app's own DOM.
+// panel (Login, OrderEntry, POSPanel, Queue, HistoryView, StockPanel
+// (Products + StockTakePanel), WeighInPanel, PendingYieldsPanel, UsersPanel,
+// SettingsPanel, ReportsPanel, StatisticsPanel, CrmPanel +
+// CrmContactDetailPanel, LicenseStatusBanner), switched by the `tab` state
+// in MainApp and gated per-role both here (nav visibility) and on the
+// server (route middleware) — client-side gating is a UX nicety, never the
+// actual security boundary. Camera-based barcode scanning (BarcodeAddModal,
+// WeighLabelScanModal) is delegated to the useBarcodeScan hook, which picks
+// a native Capacitor plugin on Android vs. the browser's own APIs
+// elsewhere. Printing (buildReceiptHtml / buildWeighInSummaryHtml /
+// printHtml) lives at the bottom as plain functions, not components, since
+// they build a full standalone HTML document string for a separate print
+// tab/iframe rather than rendering into this app's own DOM.
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { App as CapacitorApp } from "@capacitor/app";
@@ -310,7 +314,7 @@ function MainApp({ currentUser, onLogout, branding, onBrandingChange, themeMode,
     }).catch(() => undefined);
   }, []);
 
-  useEffect(() => { void refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { void refresh(); }, []);
 
   // Fetch history only when the user actually opens the history tab
   useEffect(() => {
@@ -322,7 +326,7 @@ function MainApp({ currentUser, onLogout, branding, onBrandingChange, themeMode,
   useEffect(() => {
     const id = setInterval(() => void pollActive(), 5000);
     return () => clearInterval(id);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   const notify = (text: string) => {
     setMessage(text);
@@ -932,6 +936,13 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
           <label>Customer number <span className="settings-hint">(optional — for order-ready WhatsApp updates)</span>
             <input type="tel" value={customerNumber} onChange={(e) => setCustomerNumber(e.target.value)} placeholder="e.g. 082 123 4567" />
           </label>
+          {/* Soft warning only — never blocks checkout (see canCheckout below),
+              since a garbled number just means no WhatsApp update ever goes
+              out, not a failed sale. Loose digit-count check, not a strict
+              phone format, since this field accepts any country's numbers. */}
+          {customerNumber.trim() && customerNumber.replace(/\D/g, "").length < 7 && (
+            <p className="settings-hint pos-customer-number-warning">That doesn't look like a full phone number — WhatsApp updates won't reach it as typed.</p>
+          )}
         </div>
 
         <div className="pos-payment-section">
@@ -1047,7 +1058,7 @@ function DiscountModal({ initialValue, max, onApply, onClose }: { initialValue: 
 // /auth/verify-pin) without changing the session, then calls onConfirm.
 // Doesn't re-check role/permissions itself; it's a fat-finger guard, not an
 // authorization boundary — the underlying action still enforces its own.
-function PinConfirmModal({ title, message, onConfirm, onCancel }: { title: string; message: string; onConfirm: () => void; onCancel: () => void }) {
+function PinConfirmModal({ title, message, confirmLabel = "Confirm removal", onConfirm, onCancel }: { title: string; message: string; confirmLabel?: string; onConfirm: () => void; onCancel: () => void }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1084,7 +1095,7 @@ function PinConfirmModal({ title, message, onConfirm, onCancel }: { title: strin
           {error && <p className="form-error">{error}</p>}
           <footer className="actions">
             <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
-            <button type="submit" className="danger" disabled={!pin || busy}>{busy ? "Checking…" : "Confirm removal"}</button>
+            <button type="submit" className="danger" disabled={!pin || busy}>{busy ? "Checking…" : confirmLabel}</button>
           </footer>
         </form>
       </div>
@@ -1661,6 +1672,10 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
   const [missingCost, setMissingCost] = useState<Product[]>([]);
   const [yieldRows, setYieldRows] = useState<{ subProductId: number; yieldPct: number }[]>([]);
   const [yieldMessage, setYieldMessage] = useState("");
+  // Deleting a product is permanent (soft-delete server-side, but hidden
+  // from the catalog forever after) — PIN-gated the same as any other
+  // permanent/reversal-requiring action in this app (see POS's line-removal).
+  const [pendingDelete, setPendingDelete] = useState<{ id: number; name: string } | null>(null);
   const categories = useMemo(() => [...new Set(products.map((p) => p.category).filter(Boolean))], [products]);
   // Only non-raw-intake products make sense as a cut/sub-product — a raw
   // carcass isn't itself "yielded" from another raw carcass.
@@ -1738,9 +1753,9 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
     await onChanged().catch(() => undefined);
   };
 
-  const remove = async (id: number, name: string) => {
-    if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
+  const remove = async (id: number) => {
     await api.products.delete(id);
+    setPendingDelete(null);
     await onChanged();
   };
 
@@ -1901,7 +1916,7 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
                   <td>{p.prepNotes}</td>
                   <td className="row-actions">
                     <button type="button" className="secondary" onClick={() => editProduct(p)}>Edit</button>
-                    <button type="button" className="icon-button danger" onClick={() => void remove(p.id, p.name)} title="Delete"><Trash2 size={18} /></button>
+                    <button type="button" className="icon-button danger" onClick={() => setPendingDelete({ id: p.id, name: p.name })} title="Delete" aria-label="Delete"><Trash2 size={18} /></button>
                   </td>
                 </tr>
                 );
@@ -1918,6 +1933,14 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
             setWeighScanOpen(false);
           }}
           onClose={() => setWeighScanOpen(false)}
+        />
+      )}
+      {pendingDelete && (
+        <PinConfirmModal
+          title="Delete product?"
+          message={`Enter your PIN to delete "${pendingDelete.name}". This cannot be undone.`}
+          onConfirm={() => void remove(pendingDelete.id)}
+          onCancel={() => setPendingDelete(null)}
         />
       )}
     </div>
@@ -2022,6 +2045,9 @@ function StockTakePanel({ products, currentUser, onChanged }: { products: Produc
   const [msg, setMsg] = useState("");
   const [newLocationName, setNewLocationName] = useState("");
   const [addingLocation, setAddingLocation] = useState(false);
+  // PIN-gated, same bar as any other permanent/reversal-adjacent action —
+  // removing a location affects every product counted against it.
+  const [pendingRemoveLocation, setPendingRemoveLocation] = useState<StockLocation | null>(null);
 
   const loadLocations = () =>
     api.stock.locations.list().then((locs) => {
@@ -2071,8 +2097,8 @@ function StockTakePanel({ products, currentUser, onChanged }: { products: Produc
   };
 
   const removeLocation = async (id: number) => {
-    if (!window.confirm("Remove this location? Its stock history is kept, but it won't be countable against anymore.")) return;
     await api.stock.locations.deactivate(id);
+    setPendingRemoveLocation(null);
     await loadLocations();
   };
 
@@ -2097,7 +2123,7 @@ function StockTakePanel({ products, currentUser, onChanged }: { products: Produc
               {locations.map((l) => (
                 <li key={l.id}>
                   <span>{l.name}</span>
-                  <button type="button" className="icon-button danger" title="Remove location" onClick={() => void removeLocation(l.id)}><Trash2 size={14} /></button>
+                  <button type="button" className="icon-button danger" title="Remove location" aria-label="Remove location" onClick={() => setPendingRemoveLocation(l)}><Trash2 size={14} /></button>
                 </li>
               ))}
             </ul>
@@ -2145,6 +2171,14 @@ function StockTakePanel({ products, currentUser, onChanged }: { products: Produc
           </tbody>
         </table>
       </div>
+      {pendingRemoveLocation && (
+        <PinConfirmModal
+          title="Remove location?"
+          message={`Enter your PIN to remove "${pendingRemoveLocation.name}". Its stock history is kept, but it won't be countable against anymore.`}
+          onConfirm={() => void removeLocation(pendingRemoveLocation.id)}
+          onCancel={() => setPendingRemoveLocation(null)}
+        />
+      )}
     </div>
   );
 }
@@ -2186,6 +2220,9 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
   const [historyTo, setHistoryTo] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
   const [editingLineId, setEditingLineId] = useState<number | null>(null);
+  // Deleting a line reverses its stock adjustment — PIN-gated like any
+  // other permanent, stock-reversing action in this app.
+  const [pendingDeleteLine, setPendingDeleteLine] = useState(false);
 
   const loadCurrent = () => api.weighIn.current().then((r) => setLines(r.lines)).catch(() => undefined);
   const loadSuppliers = () => api.suppliers.list().then(setSuppliers).catch(() => undefined);
@@ -2281,12 +2318,12 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
 
   const deleteLine = async () => {
     if (!editingLineId) return;
-    if (!window.confirm("Delete this line? This cannot be undone and will reverse its stock adjustment.")) return;
     setBusy(true);
     try {
       await api.weighIn.deleteLine(editingLineId);
       setLines((cur) => cur.filter((l) => l.id !== editingLineId));
       cancelEdit();
+      setPendingDeleteLine(false);
       setMsg("Line deleted.");
       await onChanged();
     } catch (err) {
@@ -2464,7 +2501,7 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
         </label>
         {msg && <div className="form-message">{msg}</div>}
         <footer className="actions">
-          {editingLineId && <button type="button" className="secondary danger" onClick={() => void deleteLine()} disabled={busy}>Delete line</button>}
+          {editingLineId && <button type="button" className="secondary danger" onClick={() => setPendingDeleteLine(true)} disabled={busy}>Delete line</button>}
           {editingLineId && <button type="button" className="secondary" onClick={cancelEdit}>Cancel</button>}
           <button type="submit" disabled={busy || cooldown}>
             <Save size={18} /> {busy ? "Saving…" : cooldown ? "Wait…" : editingLineId ? "Update line" : "Add line"}
@@ -2548,6 +2585,14 @@ function WeighInPanel({ products, currentUser, onChanged }: { products: Product[
           )}
         </div>
       )}
+      {pendingDeleteLine && (
+        <PinConfirmModal
+          title="Delete line?"
+          message="Enter your PIN to delete this line. This cannot be undone and will reverse its stock adjustment."
+          onConfirm={() => void deleteLine()}
+          onCancel={() => setPendingDeleteLine(false)}
+        />
+      )}
     </div>
   );
 }
@@ -2567,6 +2612,9 @@ function UsersPanel() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  // PIN-gated like any other permanent/lockout-risking action — only the
+  // deactivate direction needs it (see toggleActive below).
+  const [pendingDeactivate, setPendingDeactivate] = useState<User | null>(null);
 
   const load = () => api.users.list().then(setUsers).catch(() => undefined);
   useEffect(() => {
@@ -2597,12 +2645,22 @@ function UsersPanel() {
   };
 
   const toggleActive = async (user: User) => {
-    // Only confirm the deactivate direction — reactivating is harmless and
+    // Only PIN-gate the deactivate direction — reactivating is harmless and
     // shouldn't need a prompt. Sits right next to "Edit" in a compact row,
     // so a mis-tap here would otherwise lock someone out with no warning.
-    if (user.isActive && !window.confirm(`Deactivate ${user.name}? They won't be able to log in until reactivated.`)) return;
+    if (user.isActive) { setPendingDeactivate(user); return; }
     try {
-      await api.users.update(user.id, { isActive: user.isActive ? 0 : 1 });
+      await api.users.update(user.id, { isActive: 1 });
+      await load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : "Could not update user");
+    }
+  };
+
+  const confirmDeactivate = async (user: User) => {
+    try {
+      await api.users.update(user.id, { isActive: 0 });
+      setPendingDeactivate(null);
       await load();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : "Could not update user");
@@ -2682,6 +2740,15 @@ function UsersPanel() {
           </tbody>
         </table>
       </div>
+      {pendingDeactivate && (
+        <PinConfirmModal
+          title="Deactivate user?"
+          message={`Enter your PIN to deactivate ${pendingDeactivate.name}. They won't be able to log in until reactivated.`}
+          confirmLabel="Confirm deactivation"
+          onConfirm={() => void confirmDeactivate(pendingDeactivate)}
+          onCancel={() => setPendingDeactivate(null)}
+        />
+      )}
     </div>
   );
 }
@@ -2694,13 +2761,29 @@ function CrmPanel() {
   const [contacts, setContacts] = useState<CrmContact[]>([]);
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Distinguishes "still loading" from "loaded, zero results" — without
+  // this, the empty-state text flashes on every mount/search keystroke
+  // before the fetch resolves.
+  const [loading, setLoading] = useState(true);
 
-  const load = () => api.crm.contacts(search).then(setContacts).catch(() => undefined);
+  const load = () => {
+    setLoading(true);
+    api.crm.contacts(search).then(setContacts).catch(() => undefined).finally(() => setLoading(false));
+  };
   useEffect(() => {
-    void load();
-    const id = setInterval(() => void load(), 15_000);
+    load();
+    const id = setInterval(load, 15_000);
     return () => clearInterval(id);
   }, [search]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Only the true "no contacts exist at all" case (no active search)
+  // replaces the whole panel, matching every other list panel's EmptyState
+  // convention (see HistoryView/StockTakePanel) — a search that matches
+  // nothing keeps the search box visible with an inline "no matches" row,
+  // same distinction those other panels make for their own filters.
+  if (!loading && contacts.length === 0 && !search) {
+    return <EmptyState title="No contacts yet" detail="Captured automatically from POS checkout or inbound WhatsApp messages." />;
+  }
 
   return (
     <div className="products-layout">
@@ -2711,7 +2794,8 @@ function CrmPanel() {
         <table>
           <thead><tr><th>Name</th><th>Phone</th><th>Tags</th><th>Consent</th></tr></thead>
           <tbody>
-            {contacts.map((c) => (
+            {loading && <tr><td colSpan={4} className="muted">Loading…</td></tr>}
+            {!loading && contacts.map((c) => (
               <tr key={c.id} className={selectedId === c.id ? "active-row" : ""} onClick={() => setSelectedId(c.id)} style={{ cursor: "pointer" }}>
                 <td>{c.fullName || <span className="muted">Unnamed</span>}</td>
                 <td>{c.phoneNumber}</td>
@@ -2719,7 +2803,7 @@ function CrmPanel() {
                 <td><span className={`consent-badge consent-${c.consentStatus}`}>{CONSENT_LABEL[c.consentStatus]}</span></td>
               </tr>
             ))}
-            {contacts.length === 0 && <tr><td colSpan={4} className="muted">No contacts yet — captured automatically from POS checkout or inbound WhatsApp messages.</td></tr>}
+            {!loading && contacts.length === 0 && <tr><td colSpan={4} className="muted">No contacts match your search.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -2736,7 +2820,13 @@ function CrmContactDetailPanel({ contactId, onClose, onChanged }: { contactId: s
   const [freeformBody, setFreeformBody] = useState("");
   const [templates, setTemplates] = useState<{ name: string; category: "utility" | "marketing"; bodyTemplate: string }[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState("");
-  const [busy, setBusy] = useState(false);
+  // Tracks which specific action is in flight (not just a shared boolean)
+  // so each button can show its own "Saving…"/"Sending…" label rather than
+  // every button flipping to the same text regardless of which one was
+  // actually clicked — matches the busy-label convention used by every
+  // other save/submit action in the app (LoginScreen, OrderEntry, etc).
+  const [busyAction, setBusyAction] = useState<"save" | "consent" | "freeform" | "template" | null>(null);
+  const busy = busyAction !== null;
   const [msg, setMsg] = useState("");
 
   const load = () => api.crm.contact(contactId).then((d) => {
@@ -2757,7 +2847,7 @@ function CrmContactDetailPanel({ contactId, onClose, onChanged }: { contactId: s
   const { contact, messages, withinServiceWindow } = detail;
 
   const saveDetails = async () => {
-    setBusy(true); setMsg("");
+    setBusyAction("save"); setMsg("");
     try {
       await api.crm.updateContact(contact.id, {
         fullName: nameInput.trim() || null,
@@ -2769,42 +2859,42 @@ function CrmContactDetailPanel({ contactId, onClose, onChanged }: { contactId: s
       onChanged();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : "Failed to save");
-    } finally { setBusy(false); }
+    } finally { setBusyAction(null); }
   };
 
   const setConsent = async (status: ConsentStatus) => {
-    setBusy(true); setMsg("");
+    setBusyAction("consent"); setMsg("");
     try {
       await api.crm.setConsent(contact.id, status);
       await load();
       onChanged();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : "Failed to update consent");
-    } finally { setBusy(false); }
+    } finally { setBusyAction(null); }
   };
 
   const sendFreeform = async () => {
     if (!freeformBody.trim()) return;
-    setBusy(true); setMsg("");
+    setBusyAction("freeform"); setMsg("");
     try {
       await api.crm.send(contact.id, { freeformBody: freeformBody.trim() });
       setFreeformBody("");
       await load();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : "Failed to send");
-    } finally { setBusy(false); }
+    } finally { setBusyAction(null); }
   };
 
   const sendTemplate = async () => {
     if (!selectedTemplate) return;
-    setBusy(true); setMsg("");
+    setBusyAction("template"); setMsg("");
     try {
       await api.crm.send(contact.id, { templateName: selectedTemplate });
       setSelectedTemplate("");
       await load();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : "Failed to send");
-    } finally { setBusy(false); }
+    } finally { setBusyAction(null); }
   };
 
   // Marketing-tier templates can only ever be sent to opted_in contacts —
@@ -2823,14 +2913,14 @@ function CrmContactDetailPanel({ contactId, onClose, onChanged }: { contactId: s
       <label>Notes<input value={notesInput} onChange={(e) => setNotesInput(e.target.value)} /></label>
       <label>Tags (comma-separated)<input value={tagsInput} onChange={(e) => setTagsInput(e.target.value)} /></label>
       <footer className="actions">
-        <button type="button" disabled={busy} onClick={() => void saveDetails()}><Save size={16} /> Save</button>
+        <button type="button" disabled={busy} onClick={() => void saveDetails()}><Save size={16} /> {busyAction === "save" ? "Saving…" : "Save"}</button>
       </footer>
 
       <div className="crm-consent-row">
         <span>Consent: <b>{CONSENT_LABEL[contact.consentStatus]}</b></span>
         <div className="crm-consent-buttons">
-          <button type="button" className="secondary" disabled={busy || contact.consentStatus === "opted_in"} onClick={() => void setConsent("opted_in")}>Opt in</button>
-          <button type="button" className="secondary" disabled={busy || contact.consentStatus === "opted_out"} onClick={() => void setConsent("opted_out")}>Opt out</button>
+          <button type="button" className="secondary" disabled={busy || contact.consentStatus === "opted_in"} onClick={() => void setConsent("opted_in")}>{busyAction === "consent" ? "Updating…" : "Opt in"}</button>
+          <button type="button" className="secondary" disabled={busy || contact.consentStatus === "opted_out"} onClick={() => void setConsent("opted_out")}>{busyAction === "consent" ? "Updating…" : "Opt out"}</button>
         </div>
       </div>
 
@@ -2851,7 +2941,7 @@ function CrmContactDetailPanel({ contactId, onClose, onChanged }: { contactId: s
         {withinServiceWindow ? (
           <>
             <textarea value={freeformBody} onChange={(e) => setFreeformBody(e.target.value)} placeholder="Type a message…" rows={2} />
-            <button type="button" disabled={busy || !freeformBody.trim()} onClick={() => void sendFreeform()}>Send</button>
+            <button type="button" disabled={busy || !freeformBody.trim()} onClick={() => void sendFreeform()}>{busyAction === "freeform" ? "Sending…" : "Send"}</button>
           </>
         ) : (
           <>
@@ -2860,7 +2950,7 @@ function CrmContactDetailPanel({ contactId, onClose, onChanged }: { contactId: s
               <option value="">Choose a template…</option>
               {availableTemplates.map((t) => <option key={t.name} value={t.name}>{t.name} ({t.category})</option>)}
             </select>
-            <button type="button" disabled={busy || !selectedTemplate} onClick={() => void sendTemplate()}>Send template</button>
+            <button type="button" disabled={busy || !selectedTemplate} onClick={() => void sendTemplate()}>{busyAction === "template" ? "Sending…" : "Send template"}</button>
           </>
         )}
       </div>
@@ -3058,27 +3148,40 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
   };
 
   // Destructive — wipes and replaces the entire database from a backup
-  // file (see database.ts's importBackup), so this is confirmed explicitly
-  // rather than firing on file selection alone.
-  const handleRestore = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // file (see database.ts's importBackup) — the most destructive single
+  // action in the app, so it's PIN-gated the same as any other permanent
+  // action rather than firing on file selection alone. The file is read
+  // and parsed immediately (so a malformed file errors out right away),
+  // but the actual restore only runs once the PIN is confirmed.
+  const [pendingRestoreData, setPendingRestoreData] = useState<object | null>(null);
+
+  const handleRestoreFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!window.confirm("This will replace all products, users, orders and settings with the backup data. Continue?")) {
-      if (restoreInputRef.current) restoreInputRef.current.value = "";
-      return;
-    }
-    setRestoring(true);
     try {
       const text = await file.text();
-      const data = JSON.parse(text) as object;
-      const result = await api.backup.restore(data);
-      setMsg(`Restored: ${result.products} products, ${result.users} users, ${result.orders} orders`);
+      setPendingRestoreData(JSON.parse(text) as object);
+    } catch {
+      setMsg("Restore failed: not a valid backup file");
+      window.setTimeout(() => setMsg(""), 5000);
+      if (restoreInputRef.current) restoreInputRef.current.value = "";
+    }
+  };
+
+  const confirmRestore = async () => {
+    if (!pendingRestoreData) return;
+    setRestoring(true);
+    try {
+      const result = await api.backup.restore(pendingRestoreData);
+      const totalRows = Object.values(result).filter((v): v is number => typeof v === "number").reduce((sum, v) => sum + v, 0);
+      setMsg(`Restored: ${result.products} products, ${result.users} users, ${result.orders} orders, ${totalRows} rows total across all tables`);
       window.setTimeout(() => setMsg(""), 5000);
     } catch (err) {
       setMsg(`Restore failed: ${err instanceof Error ? err.message : "Unknown error"}`);
       window.setTimeout(() => setMsg(""), 5000);
     } finally {
       setRestoring(false);
+      setPendingRestoreData(null);
       if (restoreInputRef.current) restoreInputRef.current.value = "";
     }
   };
@@ -3191,7 +3294,7 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
             <button type="button" className="secondary" onClick={() => void api.backup.download()}>
               Download backup
             </button>
-            <input ref={restoreInputRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={(e) => void handleRestore(e)} />
+            <input ref={restoreInputRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={(e) => void handleRestoreFileSelected(e)} />
             <button type="button" className="secondary danger" disabled={restoring} onClick={() => restoreInputRef.current?.click()}>
               {restoring ? "Restoring…" : "Restore backup"}
             </button>
@@ -3321,6 +3424,15 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
       )}
 
       {msg && <div className="form-message">{msg}</div>}
+      {pendingRestoreData && (
+        <PinConfirmModal
+          title="Restore backup?"
+          message="Enter your PIN to replace ALL current data — products, users, orders, stock, CRM, everything — with this backup file. This cannot be undone."
+          confirmLabel="Confirm restore"
+          onConfirm={() => void confirmRestore()}
+          onCancel={() => { setPendingRestoreData(null); if (restoreInputRef.current) restoreInputRef.current.value = ""; }}
+        />
+      )}
     </div>
   );
 }
@@ -4314,7 +4426,7 @@ function printHtml(html: string): void {
 
   if (isMobile) {
     // Mobile browsers can't print from iframes — open receipt in a new tab and auto-print
-    const printable = html.replace("</head>", '<script>window.addEventListener("load",function(){window.print()})<\/script></head>');
+    const printable = html.replace("</head>", '<script>window.addEventListener("load",function(){window.print()})</script></head>');
     const blob = new Blob([printable], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     window.open(url, "_blank");

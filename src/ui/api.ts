@@ -87,7 +87,10 @@ export const api = {
   },
   backup: {
     download: () => download("/backup", `nemenchpos-backup-${new Date().toISOString().slice(0, 10)}.json`),
-    restore: (data: object) => req<{ ok: boolean; products: number; users: number; orders: number }>("POST", "/backup/restore", data)
+    // Per-table restored row counts — the exact table set is server-driven
+    // (KotDatabase.BACKUP_TABLES), so this stays loosely typed rather than
+    // hard-coding a list here that could itself fall out of sync.
+    restore: (data: object) => req<{ ok: boolean } & Record<string, number>>("POST", "/backup/restore", data)
   },
   orders: {
     list: (scope: string) => req<Order[]>("GET", `/orders?scope=${scope}`),

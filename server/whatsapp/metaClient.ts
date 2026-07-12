@@ -31,7 +31,15 @@ function getPhoneNumberId(): string | null {
   return getBusinessProfile().whatsapp_number_id;
 }
 
-async function graphPost(path: string, body: unknown): Promise<{ ok: boolean; json: any }> {
+// Only the two shapes this module actually reads from a Graph API
+// response — the real payload has many more fields depending on endpoint,
+// but nothing here needs them.
+interface GraphResponse {
+  error?: { message?: string };
+  messages?: { id?: string }[];
+}
+
+async function graphPost(path: string, body: unknown): Promise<{ ok: boolean; json: GraphResponse }> {
   if (!WHATSAPP_ACCESS_TOKEN) {
     return { ok: false, json: { error: { message: "WHATSAPP_ACCESS_TOKEN is not configured on this instance" } } };
   }
@@ -44,7 +52,7 @@ async function graphPost(path: string, body: unknown): Promise<{ ok: boolean; js
       body: JSON.stringify(body),
       signal: controller.signal
     });
-    const json = await res.json().catch(() => ({}));
+    const json = await res.json().catch(() => ({})) as GraphResponse;
     return { ok: res.ok, json };
   } catch (err) {
     return { ok: false, json: { error: { message: err instanceof Error ? err.message : "network error" } } };

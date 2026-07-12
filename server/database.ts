@@ -670,82 +670,80 @@ export class KotDatabase {
     return [header, ...rows].join("\n");
   }
 
-  // Snapshots every table into one plain object for the admin's downloadable
-  // backup file. Kept in sync with importBackup below — any new table added
-  // to the schema needs to be added to both.
-  exportBackup(): object {
-    const products = this.db.prepare("SELECT * FROM products WHERE isActive = 1").all();
-    const users = this.db.prepare("SELECT id, name, pin, role, department, isActive, createdAt FROM users").all();
-    const orders = this.db.prepare("SELECT * FROM orders ORDER BY createdAt ASC").all();
-    const orderItems = this.db.prepare("SELECT * FROM order_items").all();
-    const suppliers = this.db.prepare("SELECT * FROM suppliers").all();
-    const weighInBatches = this.db.prepare("SELECT * FROM weigh_in_batches").all();
-    const weighInLines = this.db.prepare("SELECT * FROM weigh_in_lines").all();
-    const stockLocations = this.db.prepare("SELECT * FROM stock_locations").all();
-    const productStock = this.db.prepare("SELECT * FROM product_stock").all();
-    const settings = this.db.prepare("SELECT key, value FROM settings").all() as { key: string; value: string }[];
-    return {
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      products,
-      users,
-      orders,
-      orderItems,
-      suppliers,
-      weighInBatches,
-      weighInLines,
-      stockLocations,
-      productStock,
-      settings: Object.fromEntries(settings.map((s) => [s.key, s.value]))
-    };
+  // Every real data table except `settings` (flattened to a plain key/value
+  // object below, since that's how the rest of the app already treats it)
+  // and `local_profile_cache` (deliberately excluded — it's just a cached
+  // copy of the last control-plane sync, not real business data; it
+  // self-heals within 15 minutes of the server starting either way, so
+  // restoring a stale copy would only ever be actively wrong).
+  //
+  // IMPORTANT: this list is the single source of truth for what a backup
+  // covers. When adding a new table to the schema (see migrate()'s "(3)
+  // CREATE TABLE IF NOT EXISTS" block), add its name here too — everything
+  // else (export, delete-on-restore, insert-on-restore, column list) is
+  // derived automatically from the table's own real schema, so there's no
+  // separate column list to keep in sync and forget (a past bug: orders'
+  // discountAmount/paymentMethod/cashTendered/crmContactId columns were
+  // captured on export but silently dropped on import, because the old
+  // restore INSERT hand-typed an older, shorter column list).
+  private static readonly BACKUP_TABLES = [
+    "users", "suppliers", "stock_locations", "crm_contacts", "crm_tags",
+    "products", "crm_contact_tags", "crm_messages", "whatsapp_outbox", "crm_automation_rules",
+    "orders", "order_items", "weigh_in_batches", "weigh_in_lines",
+    "product_cost_history", "product_yield_estimates", "pending_yield_conversions", "pending_yield_items",
+    "product_stock"
+  ];
+
+  private tableColumns(table: string): string[] {
+    return (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
   }
 
-  // Wipes and replaces every table from a backup file, preserving original
-  // row IDs (so foreign keys between orders/order_items etc. stay valid).
-  // Runs with foreign_keys temporarily OFF because SQLite requires that
-  // outside of a transaction, and a mid-restore state would otherwise
-  // violate FK constraints (e.g. order_items inserted before their order).
-  importBackup(data: Record<string, unknown>): { products: number; users: number; orders: number } {
-    if (!data.version || !Array.isArray(data.products)) throw new Error("Invalid backup file");
-    const products = data.products as Record<string, unknown>[];
-    const users = (data.users as Record<string, unknown>[]) ?? [];
-    const orders = (data.orders as Record<string, unknown>[]) ?? [];
-    const orderItems = (data.orderItems as Record<string, unknown>[]) ?? [];
-    const suppliers = (data.suppliers as Record<string, unknown>[]) ?? [];
-    const weighInBatches = (data.weighInBatches as Record<string, unknown>[]) ?? [];
-    const weighInLines = (data.weighInLines as Record<string, unknown>[]) ?? [];
-    const stockLocations = (data.stockLocations as Record<string, unknown>[]) ?? [];
-    const productStock = (data.productStock as Record<string, unknown>[]) ?? [];
-    const settings = (data.settings as Record<string, string>) ?? {};
+  // Snapshots every table in BACKUP_TABLES into one plain object for the
+  // admin's downloadable backup file, via a genuine `SELECT *` — whatever
+  // columns actually exist on the table, no hand-typed list to fall behind.
+  exportBackup(): Record<string, unknown> {
+    const data: Record<string, unknown> = { version: 1, exportedAt: new Date().toISOString() };
+    for (const table of KotDatabase.BACKUP_TABLES) {
+      data[table] = this.db.prepare(`SELECT * FROM ${table}`).all();
+    }
+    const settings = this.db.prepare("SELECT key, value FROM settings").all() as { key: string; value: string }[];
+    data.settings = Object.fromEntries(settings.map((s) => [s.key, s.value]));
+    return data;
+  }
 
-    // FK must be disabled outside transactions in SQLite
+  // Wipes and replaces every table in BACKUP_TABLES from a backup file,
+  // preserving original row IDs (so foreign keys between orders/order_items
+  // etc. stay valid). Runs with foreign_keys temporarily OFF because SQLite
+  // requires that outside of a transaction, and a mid-restore state would
+  // otherwise violate FK constraints along the way.
+  //
+  // Each table's INSERT column list is built from the intersection of (a)
+  // the keys actually present on the first row of that table's backed-up
+  // data and (b) that table's real current columns (via PRAGMA table_info)
+  // — so a backup taken on an older schema version still restores cleanly
+  // (missing newer columns just fall back to their table DEFAULT), and a
+  // backup with a stray/renamed key can't be used to write into a column
+  // that doesn't really exist.
+  importBackup(data: Record<string, unknown>): Record<string, number> {
+    if (!data.version || !Array.isArray(data.products)) throw new Error("Invalid backup file");
+    const settings = (data.settings as Record<string, string>) ?? {};
+    const counts: Record<string, number> = {};
+
     this.db.exec("PRAGMA foreign_keys = OFF");
     try {
       this.db.transaction(() => {
-        this.db.exec("DELETE FROM product_stock; DELETE FROM stock_locations; DELETE FROM weigh_in_lines; DELETE FROM weigh_in_batches; DELETE FROM suppliers; DELETE FROM order_items; DELETE FROM orders; DELETE FROM products; DELETE FROM users;");
-        for (const u of users) {
-          this.db.prepare("INSERT INTO users (id,name,pin,role,department,isActive,createdAt) VALUES (?,?,?,?,?,?,?)")
-            .run(u.id ?? null, u.name, u.pin, u.role, u.department ?? null, u.isActive ?? 1, u.createdAt);
+        for (const table of [...KotDatabase.BACKUP_TABLES].reverse()) {
+          this.db.exec(`DELETE FROM ${table}`);
         }
-        const now = new Date().toISOString();
-        for (const p of products) {
-          this.db.prepare("INSERT INTO products (id,name,category,unitDefault,pricePerUnit,prepNotes,department,lowStockThreshold,onHandQty,lastCountedAt,lastCountedById,barcode,isActive,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)")
-            .run(p.id ?? null, p.name, p.category, p.unitDefault, p.pricePerUnit ?? null, p.prepNotes, p.department, p.lowStockThreshold ?? null, p.onHandQty ?? 0, p.lastCountedAt ?? null, p.lastCountedById ?? null, p.barcode ?? null, p.createdAt ?? now, p.updatedAt ?? now);
+        for (const table of KotDatabase.BACKUP_TABLES) {
+          const rows = (data[table] as Record<string, unknown>[]) ?? [];
+          counts[table] = rows.length;
+          if (rows.length === 0) continue;
+          const validColumns = new Set(this.tableColumns(table));
+          const columns = Object.keys(rows[0]).filter((c) => validColumns.has(c));
+          const insert = this.db.prepare(`INSERT INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`);
+          for (const row of rows) insert.run(...columns.map((c) => row[c] ?? null));
         }
-        const insOrder = this.db.prepare("INSERT INTO orders (id,ticketNumber,customerName,customerPhone,orderType,deliveryAddress,requestedTime,assignedTo,status,kitchenStatus,counterStatus,requestedById,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
-        for (const o of orders) insOrder.run(o.id,o.ticketNumber,o.customerName,o.customerPhone,o.orderType,o.deliveryAddress,o.requestedTime,o.assignedTo??null,o.status,o.kitchenStatus,o.counterStatus,o.requestedById??null,o.createdAt,o.updatedAt);
-        const insItem = this.db.prepare("INSERT INTO order_items (id,orderId,productId,name,kg,quantity,notes,unitPrice,lineTotal,wantedPrice,department) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
-        for (const i of orderItems) insItem.run(i.id,i.orderId,i.productId??null,i.name,i.kg??null,i.quantity??null,i.notes,i.unitPrice??null,i.lineTotal??null,i.wantedPrice??null,i.department);
-        const insSupplier = this.db.prepare("INSERT INTO suppliers (id,name,isActive,createdAt) VALUES (?,?,?,?)");
-        for (const s of suppliers) insSupplier.run(s.id,s.name,s.isActive??1,s.createdAt);
-        const insBatch = this.db.prepare("INSERT INTO weigh_in_batches (id,status,createdById,createdAt,finalizedAt) VALUES (?,?,?,?,?)");
-        for (const b of weighInBatches) insBatch.run(b.id,b.status,b.createdById??null,b.createdAt,b.finalizedAt??null);
-        const insLoc = this.db.prepare("INSERT INTO stock_locations (id,name,isActive,createdAt) VALUES (?,?,?,?)");
-        for (const loc of stockLocations) insLoc.run(loc.id,loc.name,loc.isActive??1,loc.createdAt);
-        const insLine = this.db.prepare("INSERT INTO weigh_in_lines (id,batchId,productId,grade,piecesReceived,weightKg,supplierId,locationId,createdById,createdAt) VALUES (?,?,?,?,?,?,?,?,?,?)");
-        for (const l of weighInLines) insLine.run(l.id,l.batchId,l.productId,l.grade,l.piecesReceived,l.weightKg,l.supplierId??null,l.locationId??null,l.createdById??null,l.createdAt);
-        const insPStock = this.db.prepare("INSERT INTO product_stock (productId,locationId,qty,lastCountedAt,lastCountedById,updatedAt) VALUES (?,?,?,?,?,?)");
-        for (const ps of productStock) insPStock.run(ps.productId,ps.locationId,ps.qty??0,ps.lastCountedAt??null,ps.lastCountedById??null,ps.updatedAt??now);
         for (const [key, value] of Object.entries(settings)) {
           this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, value);
         }
@@ -753,7 +751,7 @@ export class KotDatabase {
     } finally {
       this.db.exec("PRAGMA foreign_keys = ON");
     }
-    return { products: products.length, users: users.length, orders: orders.length };
+    return counts;
   }
 
   deleteProduct(id: number): void {
@@ -1898,15 +1896,6 @@ export class KotDatabase {
     }
   }
 
-  getOutboxItem(id: string): WhatsappOutboxItem | null {
-    return this.db
-      .prepare(`
-        SELECT id, contact_id as contactId, template_name as templateName, template_params as templateParams,
-               freeform_body as freeformBody, status, attempts, created_at as createdAt, sent_at as sentAt
-        FROM whatsapp_outbox WHERE id = ?`)
-      .get(id) as WhatsappOutboxItem | null;
-  }
-
   // Only used internally by the worker to find the crm_messages row to
   // update after a send attempt — not part of the public WhatsappOutboxItem
   // shape (crm_message_id is an implementation detail of the link, not
@@ -1950,10 +1939,6 @@ export class KotDatabase {
       this.db.prepare("INSERT INTO crm_automation_rules (id, event_name, template_name, enabled) VALUES (?, ?, ?, ?)").run(randomUUID(), eventName, templateName, enabled ? 1 : 0);
     }
     return this.getAutomationRule(eventName)!;
-  }
-
-  linkOrderToContact(orderId: number, contactId: string): void {
-    this.db.prepare("UPDATE orders SET crmContactId = ? WHERE id = ?").run(contactId, orderId);
   }
 
   // Populates a brand-new database with a default admin login (Admin/0000

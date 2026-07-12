@@ -3,6 +3,7 @@
 // routing fallback. Run via `npm run start` (prod) or `npm run dev` (with
 // Vite's dev server proxying to this on PORT, default 3001).
 import express from "express";
+import type { Request } from "express";
 import cors from "cors";
 import compression from "compression";
 import helmet from "helmet";
@@ -86,7 +87,16 @@ app.use(helmet({
 const devOrigins = ["http://localhost:5173", "http://127.0.0.1:5173"];
 app.use(cors({ origin: isProd ? [] : devOrigins, credentials: true }));
 
-app.use(express.json({ limit: "10mb" }));
+// `verify` stashes the exact raw bytes onto req.rawBody alongside the usual
+// parsed req.body — needed by the WhatsApp webhook route to check Meta's
+// X-Hub-Signature-256 HMAC, which is computed over the raw request body,
+// not any re-serialization of the parsed JSON (key order/whitespace would
+// never match). Cheap enough to do for every request rather than scoping
+// a second body parser to just that one route.
+app.use(express.json({
+  limit: "10mb",
+  verify: (req, _res, buf) => { (req as Request & { rawBody?: Buffer }).rawBody = buf; }
+}));
 
 // Uploaded assets (e.g. custom logo) — served from the persistent data dir, not dist/
 const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), "data");
