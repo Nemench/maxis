@@ -543,6 +543,27 @@ export interface LabelFormat {
   pageHeightMm: number | null;
 }
 
+// What an admin submits to add/edit a custom sheet format that isn't one
+// of the bundled Tower/Avery presets — e.g. a sheet from a different
+// brand, or a Tower/Avery code not yet in the bundled list. Same shape
+// as LabelFormat minus id/name, which are derived server-side (see
+// createLabelFormat) rather than typed by hand.
+export interface LabelFormatInput {
+  brand: string;
+  code: string;
+  type: "thermal" | "a4_sheet";
+  widthMm: number;
+  heightMm: number;
+  sheetCols: number | null;
+  sheetRows: number | null;
+  marginTopMm: number | null;
+  marginLeftMm: number | null;
+  gapXMm: number | null;
+  gapYMm: number | null;
+  pageWidthMm: number | null;
+  pageHeightMm: number | null;
+}
+
 // Input to the label renderers — resolved from a Product plus whatever
 // the staff member entered (weight, if the product is sold by weight).
 // unitDefault === "qty" means fixed-unit/each; "kg" and "kg_qty" both mean

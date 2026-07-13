@@ -1,7 +1,7 @@
 // Thin typed wrapper around the backend REST API. Every call goes through
 // req()/download(), which attach the JWT and centrally handle a 401 (token
 // missing/expired) by clearing it and forcing a reload back to the login screen.
-import type { User, UserInput, Product, ProductInput, QuickCreateProductInput, Order, OrderItemInput, CreateOrderInput, OrderStatus, Department, DeptStatus, Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput, StockLocation, ProductStockRow, ItemSalesStat, ItemStockMovementStat, StatisticsOverview, MarginOverview, YieldEstimate, YieldEstimateInput, PendingYieldConversion, CrmContact, CrmContactInput, CrmContactDetail, CrmTag, CrmMessage, CrmAutomationRule, ConsentStatus, EmailSubscriber, CampaignPromo, LabelFormat, DiscoveredPrinter } from "../shared/types";
+import type { User, UserInput, Product, ProductInput, QuickCreateProductInput, Order, OrderItemInput, CreateOrderInput, OrderStatus, Department, DeptStatus, Supplier, WeighInBatch, WeighInBatchSummary, WeighInLine, WeighInLineInput, StockLocation, ProductStockRow, ItemSalesStat, ItemStockMovementStat, StatisticsOverview, MarginOverview, YieldEstimate, YieldEstimateInput, PendingYieldConversion, CrmContact, CrmContactInput, CrmContactDetail, CrmTag, CrmMessage, CrmAutomationRule, ConsentStatus, EmailSubscriber, CampaignPromo, LabelFormat, LabelFormatInput, DiscoveredPrinter } from "../shared/types";
 import { tokenStorage } from "./tokenStorage";
 
 // The native Android app now live-loads its own server's page directly
@@ -193,6 +193,9 @@ export const api = {
     finalize: (orderId: number) => req<Order>("POST", `/consolidation/${orderId}/finalize`)
   },
   labels: {
-    formats: () => req<LabelFormat[]>("GET", "/labels/formats")
+    formats: () => req<LabelFormat[]>("GET", "/labels/formats"),
+    createFormat: (data: LabelFormatInput) => req<LabelFormat>("POST", "/labels/formats", data),
+    updateFormat: (id: string, data: LabelFormatInput) => req<LabelFormat>("PUT", `/labels/formats/${encodeURIComponent(id)}`, data),
+    deleteFormat: (id: string) => req<void>("DELETE", `/labels/formats/${encodeURIComponent(id)}`)
   }
 };

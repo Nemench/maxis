@@ -17,7 +17,7 @@ import type {
   StockLocation, ProductStockRow, ItemSalesStat, ItemStockMovementStat, StatisticsOverview,
   MarginStat, MarginOverview, YieldEstimate, YieldEstimateInput, PendingYieldConversion, PendingYieldItem,
   CrmContact, CrmContactInput, CrmMessage, MessageDirection, MessageType, MessageStatus,
-  WhatsappOutboxItem, CrmAutomationRule, ConsentStatus, CrmContactDetail, CrmTag, EmailOutboxItem, EmailSubscriber, OrderMessageTemplate, LabelFormat
+  WhatsappOutboxItem, CrmAutomationRule, ConsentStatus, CrmContactDetail, CrmTag, EmailOutboxItem, EmailSubscriber, OrderMessageTemplate, LabelFormat, LabelFormatInput
 } from "../src/shared/types.js";
 import { generateInternalBarcode } from "../src/shared/internalBarcode.js";
 import { generateConsolidationBarcode } from "../src/shared/orderConsolidationBarcode.js";
@@ -2684,6 +2684,71 @@ export class KotDatabase {
     return this.db
       .prepare("SELECT id, name, type, brand, code, widthMm, heightMm, sheetCols, sheetRows, marginTopMm, marginLeftMm, gapXMm, gapYMm, pageWidthMm, pageHeightMm FROM label_formats ORDER BY sortOrder ASC")
       .all() as LabelFormat[];
+  }
+
+  private getLabelFormat(id: string): LabelFormat {
+    const row = this.db
+      .prepare("SELECT id, name, type, brand, code, widthMm, heightMm, sheetCols, sheetRows, marginTopMm, marginLeftMm, gapXMm, gapYMm, pageWidthMm, pageHeightMm FROM label_formats WHERE id = ?")
+      .get(id) as LabelFormat | undefined;
+    if (!row) throw new Error(`Label format "${id}" not found`);
+    return row;
+  }
+
+  // Lets an admin add a sheet that isn't one of the bundled Tower/Avery
+  // presets — any brand/code they physically have, so a format this app
+  // doesn't already know about still works rather than being a dead end.
+  // Ids are prefixed "custom_" (vs. the bundled presets' "thermal_"/
+  // "a4_"/"tw_"/"av_" prefixes) purely so the client can tell which rows
+  // it's safe to offer editing/deleting for — never touches a bundled
+  // preset's row. Appended after every existing format (sortOrder =
+  // current max + 1) so custom formats show up after the presets, not
+  // interleaved with them.
+  createLabelFormat(input: LabelFormatInput): LabelFormat {
+    const brand = input.brand.trim();
+    const code = input.code.trim();
+    if (!brand) throw new Error("Brand is required");
+    if (!code) throw new Error("Product code is required");
+    if (!(input.widthMm > 0) || !(input.heightMm > 0)) throw new Error("Label width and height must be greater than 0");
+    if (input.type === "a4_sheet" && (!input.sheetCols || !input.sheetRows)) {
+      throw new Error("Columns and rows are required for a sheet format");
+    }
+    const id = `custom_${randomUUID().slice(0, 8)}`;
+    const name = input.type === "a4_sheet" && input.sheetCols && input.sheetRows
+      ? `${brand} ${code} - ${input.sheetCols * input.sheetRows}/sheet`
+      : `${brand} ${code}`;
+    const { sort } = this.db.prepare("SELECT COALESCE(MAX(sortOrder), 0) + 1 as sort FROM label_formats").get() as { sort: number };
+    this.db
+      .prepare("INSERT INTO label_formats (id, name, type, brand, code, widthMm, heightMm, sheetCols, sheetRows, marginTopMm, marginLeftMm, gapXMm, gapYMm, pageWidthMm, pageHeightMm, sortOrder, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(id, name, input.type, brand, code, input.widthMm, input.heightMm, input.sheetCols, input.sheetRows, input.marginTopMm, input.marginLeftMm, input.gapXMm, input.gapYMm, input.pageWidthMm, input.pageHeightMm, sort, new Date().toISOString());
+    return this.getLabelFormat(id);
+  }
+
+  // Only for "custom_"-prefixed (i.e. not a bundled preset) rows — see
+  // createLabelFormat's comment. Re-derives the display name from the
+  // (possibly changed) brand/code/count, same as creation.
+  updateLabelFormat(id: string, input: LabelFormatInput): LabelFormat {
+    if (!id.startsWith("custom_")) throw new Error("Only a custom format can be edited");
+    const brand = input.brand.trim();
+    const code = input.code.trim();
+    if (!brand) throw new Error("Brand is required");
+    if (!code) throw new Error("Product code is required");
+    if (!(input.widthMm > 0) || !(input.heightMm > 0)) throw new Error("Label width and height must be greater than 0");
+    if (input.type === "a4_sheet" && (!input.sheetCols || !input.sheetRows)) {
+      throw new Error("Columns and rows are required for a sheet format");
+    }
+    const name = input.type === "a4_sheet" && input.sheetCols && input.sheetRows
+      ? `${brand} ${code} - ${input.sheetCols * input.sheetRows}/sheet`
+      : `${brand} ${code}`;
+    const result = this.db
+      .prepare("UPDATE label_formats SET name=?, type=?, brand=?, code=?, widthMm=?, heightMm=?, sheetCols=?, sheetRows=?, marginTopMm=?, marginLeftMm=?, gapXMm=?, gapYMm=?, pageWidthMm=?, pageHeightMm=? WHERE id=?")
+      .run(name, input.type, brand, code, input.widthMm, input.heightMm, input.sheetCols, input.sheetRows, input.marginTopMm, input.marginLeftMm, input.gapXMm, input.gapYMm, input.pageWidthMm, input.pageHeightMm, id);
+    if (result.changes === 0) throw new Error(`Label format "${id}" not found`);
+    return this.getLabelFormat(id);
+  }
+
+  deleteLabelFormat(id: string): void {
+    if (!id.startsWith("custom_")) throw new Error("Only a custom format can be deleted");
+    this.db.prepare("DELETE FROM label_formats WHERE id = ?").run(id);
   }
 
   // Populates a brand-new database with a default admin login (Admin/0000

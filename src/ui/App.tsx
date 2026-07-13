@@ -29,6 +29,7 @@ import {
   MessageCircle,
   Moon,
   Package,
+  Pencil,
   Plus,
   Printer,
   RefreshCw,
@@ -77,6 +78,7 @@ import type {
   ConsentStatus,
   EmailSubscriber,
   LabelFormat,
+  LabelFormatInput,
   LabelData,
   DiscoveredPrinter,
   UnitDefault
@@ -2037,6 +2039,76 @@ interface LabelBatchRow {
   quantity: number;
 }
 
+// Raw, string-valued form state for adding/editing a custom sheet format
+// not covered by the bundled Tower/Avery presets — kept as strings (not
+// numbers) since fields are legitimately blank mid-edit, same reasoning
+// as LabelBatchRow.weightKgText above. Parsed to LabelFormatInput only on
+// submit (see toCustomFormatInput).
+interface CustomFormatFormState {
+  brand: string;
+  code: string;
+  type: "thermal" | "a4_sheet";
+  widthMm: string;
+  heightMm: string;
+  sheetCols: string;
+  sheetRows: string;
+  marginTopMm: string;
+  marginLeftMm: string;
+  gapXMm: string;
+  gapYMm: string;
+  pageWidthMm: string;
+  pageHeightMm: string;
+}
+
+const EMPTY_CUSTOM_FORMAT: CustomFormatFormState = {
+  brand: "", code: "", type: "a4_sheet", widthMm: "", heightMm: "", sheetCols: "", sheetRows: "",
+  marginTopMm: "", marginLeftMm: "", gapXMm: "", gapYMm: "", pageWidthMm: "", pageHeightMm: ""
+};
+
+function customFormatFromLabelFormat(f: LabelFormat): CustomFormatFormState {
+  return {
+    brand: f.brand ?? "",
+    code: f.code ?? "",
+    type: f.type,
+    widthMm: String(f.widthMm),
+    heightMm: String(f.heightMm),
+    sheetCols: f.sheetCols != null ? String(f.sheetCols) : "",
+    sheetRows: f.sheetRows != null ? String(f.sheetRows) : "",
+    marginTopMm: f.marginTopMm != null ? String(f.marginTopMm) : "",
+    marginLeftMm: f.marginLeftMm != null ? String(f.marginLeftMm) : "",
+    gapXMm: f.gapXMm != null ? String(f.gapXMm) : "",
+    gapYMm: f.gapYMm != null ? String(f.gapYMm) : "",
+    pageWidthMm: f.pageWidthMm != null ? String(f.pageWidthMm) : "",
+    pageHeightMm: f.pageHeightMm != null ? String(f.pageHeightMm) : ""
+  };
+}
+
+// Blank margin/gap/page-size fields fall back to 0 (margins/gaps) or
+// null (page size, meaning "default 210x297 A4 portrait" — see
+// LabelFormat's schema comment) rather than being required — a first
+// pass at a custom format is often "I know the label size and how many
+// fit, I'll nudge the margins after a real test print" (same TODO/
+// calibrate posture already used for the bundled presets' own less-
+// certain entries).
+function toCustomFormatInput(form: CustomFormatFormState): LabelFormatInput {
+  const num = (s: string): number | null => (s.trim() ? Number(s) : null);
+  return {
+    brand: form.brand,
+    code: form.code,
+    type: form.type,
+    widthMm: Number(form.widthMm),
+    heightMm: Number(form.heightMm),
+    sheetCols: form.type === "a4_sheet" ? num(form.sheetCols) : null,
+    sheetRows: form.type === "a4_sheet" ? num(form.sheetRows) : null,
+    marginTopMm: num(form.marginTopMm) ?? 0,
+    marginLeftMm: num(form.marginLeftMm) ?? 0,
+    gapXMm: num(form.gapXMm) ?? 0,
+    gapYMm: num(form.gapYMm) ?? 0,
+    pageWidthMm: num(form.pageWidthMm),
+    pageHeightMm: num(form.pageHeightMm)
+  };
+}
+
 // Search, add one or more products to a batch (each with its own
 // quantity, and weight if sold by weight), pick a sheet/roll format, and
 // print. Selection controls and the live preview are rendered by this
@@ -2055,18 +2127,30 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
   const [alignmentMode, setAlignmentMode] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [message, setMessage] = useState("");
+  const [customFormOpen, setCustomFormOpen] = useState(false);
+  const [customFormEditingId, setCustomFormEditingId] = useState<string | null>(null);
+  const [customForm, setCustomForm] = useState<CustomFormatFormState>(EMPTY_CUSTOM_FORMAT);
+  const [customFormBusy, setCustomFormBusy] = useState(false);
+  const [customFormError, setCustomFormError] = useState("");
 
-  useEffect(() => {
-    Promise.all([api.labels.formats(), api.settings.get().catch(() => ({} as Record<string, string>))]).then(([list, settings]) => {
-      setFormats(list);
-      // Priority: whatever this browser last used > the admin-configured
-      // "sheet currently loaded in the printer" default (Settings >
-      // Printing) > just the first format in the list.
-      const remembered = localStorage.getItem(LAST_LABEL_FORMAT_KEY);
-      const initial = list.find((f) => f.id === remembered) ?? list.find((f) => f.id === settings.activeLabelSheetFormat) ?? list[0];
-      if (initial) setFormatId(initial.id);
-    }).catch(() => undefined);
-  }, []);
+  useEffect(() => { void loadFormats(); }, []);
+
+  // Shared by the initial load and by create/edit/delete of a custom
+  // format — always re-fetches from the server rather than patching
+  // local state by hand, so the picker can never drift from what's
+  // actually saved. `selectId`, if given, is preferred over the usual
+  // remembered/admin-default priority (used right after creating/editing
+  // a format, so it's immediately selected).
+  const loadFormats = async (selectId?: string) => {
+    const [list, settings] = await Promise.all([api.labels.formats(), api.settings.get().catch(() => ({} as Record<string, string>))]);
+    setFormats(list);
+    const remembered = localStorage.getItem(LAST_LABEL_FORMAT_KEY);
+    const initial = (selectId && list.find((f) => f.id === selectId))
+      ?? list.find((f) => f.id === remembered)
+      ?? list.find((f) => f.id === settings.activeLabelSheetFormat)
+      ?? list[0];
+    if (initial) setFormatId(initial.id);
+  };
 
   const matches = useMemo(() => {
     if (!search.trim()) return [];
@@ -2121,6 +2205,48 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
       if (next.has(pos)) next.delete(pos); else next.add(pos);
       return next;
     });
+  };
+
+  const openAddCustomFormat = () => {
+    setCustomFormEditingId(null);
+    setCustomForm(EMPTY_CUSTOM_FORMAT);
+    setCustomFormError("");
+    setCustomFormOpen(true);
+  };
+
+  const openEditCustomFormat = (f: LabelFormat) => {
+    setCustomFormEditingId(f.id);
+    setCustomForm(customFormatFromLabelFormat(f));
+    setCustomFormError("");
+    setCustomFormOpen(true);
+  };
+
+  const closeCustomFormatForm = () => {
+    setCustomFormOpen(false);
+    setCustomFormEditingId(null);
+    setCustomFormError("");
+  };
+
+  const submitCustomFormat = async () => {
+    const input = toCustomFormatInput(customForm);
+    setCustomFormBusy(true); setCustomFormError("");
+    try {
+      const saved = customFormEditingId
+        ? await api.labels.updateFormat(customFormEditingId, input)
+        : await api.labels.createFormat(input);
+      await loadFormats(saved.id);
+      closeCustomFormatForm();
+    } catch (err) {
+      setCustomFormError(err instanceof Error ? err.message : "Could not save this format.");
+    } finally {
+      setCustomFormBusy(false);
+    }
+  };
+
+  const deleteCustomFormat = async (f: LabelFormat) => {
+    if (!window.confirm(`Delete the custom format "${f.name}"? This can't be undone.`)) return;
+    await api.labels.deleteFormat(f.id);
+    await loadFormats();
   };
 
   const print = () => {
@@ -2279,20 +2405,63 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
                 <div className="format-picker-group" key={brand}>
                   <div className="format-picker-group-label">{brand}</div>
                   {list.map((f) => (
-                    <button
-                      type="button"
-                      key={f.id}
-                      className={`format-picker-row${f.id === formatId ? " active" : ""}`}
-                      onClick={() => changeFormat(f.id)}
-                    >
-                      <span className="format-picker-name">{f.brand ? `${f.brand} ${f.code ?? f.name}` : f.name}</span>
-                      <span className="format-picker-meta">{describeFormat(f)}</span>
-                    </button>
+                    <div className={`format-picker-row-wrap${f.id === formatId ? " active" : ""}`} key={f.id}>
+                      <button type="button" className="format-picker-row" onClick={() => changeFormat(f.id)}>
+                        <span className="format-picker-name">{f.brand ? `${f.brand} ${f.code ?? f.name}` : f.name}</span>
+                        <span className="format-picker-meta">{describeFormat(f)}</span>
+                      </button>
+                      {f.id.startsWith("custom_") && (
+                        <span className="format-picker-row-actions">
+                          <button type="button" className="icon-button sm" title="Edit this custom format" aria-label="Edit" onClick={() => openEditCustomFormat(f)}><Pencil size={14} /></button>
+                          <button type="button" className="icon-button danger sm" title="Delete this custom format" aria-label="Delete" onClick={() => void deleteCustomFormat(f)}><Trash2 size={14} /></button>
+                        </span>
+                      )}
+                    </div>
                   ))}
                 </div>
               ))}
               {formatQuery.trim() && filteredFormats.length === 0 && <p className="settings-hint">No formats match &quot;{formatQuery}&quot;.</p>}
             </div>
+
+            {!customFormOpen ? (
+              <button type="button" className="secondary sm" onClick={openAddCustomFormat}><Plus size={14} /> Add a sheet not listed above</button>
+            ) : (
+              <div className="custom-format-form">
+                <h4>{customFormEditingId ? "Edit custom sheet" : "Add a custom sheet"}</h4>
+                <p className="settings-hint">Have a brand/size not in the list above? Enter what's printed on the sheet's packaging — you can nudge the margins later once you've test-printed a page.</p>
+                <div className="custom-format-grid">
+                  <label>Brand<input value={customForm.brand} onChange={(e) => setCustomForm({ ...customForm, brand: e.target.value })} placeholder="e.g. Croxley" /></label>
+                  <label>Product code<input value={customForm.code} onChange={(e) => setCustomForm({ ...customForm, code: e.target.value })} placeholder="e.g. CX4102" /></label>
+                  <label>Type
+                    <select value={customForm.type} onChange={(e) => setCustomForm({ ...customForm, type: e.target.value as "thermal" | "a4_sheet" })}>
+                      <option value="a4_sheet">Sheet (multiple labels per page)</option>
+                      <option value="thermal">Thermal roll (one label per print)</option>
+                    </select>
+                  </label>
+                  <label>Label width (mm)<input type="number" min="0" step="0.1" value={customForm.widthMm} onChange={(e) => setCustomForm({ ...customForm, widthMm: e.target.value })} /></label>
+                  <label>Label height (mm)<input type="number" min="0" step="0.1" value={customForm.heightMm} onChange={(e) => setCustomForm({ ...customForm, heightMm: e.target.value })} /></label>
+                  {customForm.type === "a4_sheet" && (
+                    <>
+                      <label>Columns<input type="number" min="1" step="1" value={customForm.sheetCols} onChange={(e) => setCustomForm({ ...customForm, sheetCols: e.target.value })} /></label>
+                      <label>Rows<input type="number" min="1" step="1" value={customForm.sheetRows} onChange={(e) => setCustomForm({ ...customForm, sheetRows: e.target.value })} /></label>
+                      <label>Top margin (mm) <span className="optional-hint">(optional)</span><input type="number" step="0.1" value={customForm.marginTopMm} onChange={(e) => setCustomForm({ ...customForm, marginTopMm: e.target.value })} placeholder="0" /></label>
+                      <label>Left margin (mm) <span className="optional-hint">(optional)</span><input type="number" step="0.1" value={customForm.marginLeftMm} onChange={(e) => setCustomForm({ ...customForm, marginLeftMm: e.target.value })} placeholder="0" /></label>
+                      <label>Gap between columns (mm) <span className="optional-hint">(optional)</span><input type="number" step="0.1" value={customForm.gapXMm} onChange={(e) => setCustomForm({ ...customForm, gapXMm: e.target.value })} placeholder="0" /></label>
+                      <label>Gap between rows (mm) <span className="optional-hint">(optional)</span><input type="number" step="0.1" value={customForm.gapYMm} onChange={(e) => setCustomForm({ ...customForm, gapYMm: e.target.value })} placeholder="0" /></label>
+                      <label>Page width (mm) <span className="optional-hint">(optional — default 210, A4)</span><input type="number" step="0.1" value={customForm.pageWidthMm} onChange={(e) => setCustomForm({ ...customForm, pageWidthMm: e.target.value })} placeholder="210" /></label>
+                      <label>Page height (mm) <span className="optional-hint">(optional — default 297, A4)</span><input type="number" step="0.1" value={customForm.pageHeightMm} onChange={(e) => setCustomForm({ ...customForm, pageHeightMm: e.target.value })} placeholder="297" /></label>
+                    </>
+                  )}
+                </div>
+                {customFormError && <p className="form-error">{customFormError}</p>}
+                <footer className="actions">
+                  <button type="button" className="secondary" onClick={closeCustomFormatForm}>Cancel</button>
+                  <button type="button" disabled={customFormBusy || !customForm.brand.trim() || !customForm.code.trim() || !customForm.widthMm || !customForm.heightMm} onClick={() => void submitCustomFormat()}>
+                    {customFormBusy ? "Saving…" : customFormEditingId ? "Save changes" : "Add format"}
+                  </button>
+                </footer>
+              </div>
+            )}
           </div>
 
           {message && <p className="form-error">{message}</p>}
