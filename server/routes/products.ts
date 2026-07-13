@@ -21,6 +21,18 @@ router.get("/", (_req, res) => { res.json(db.listProducts()); });
 // with 0, so these need someone to actually enter a real number.
 router.get("/missing-cost", requireAdmin, (_req, res) => { res.json(db.listProductsMissingCost()); });
 
+// On-demand version of the reconciliation pass that otherwise only runs
+// at server startup and after a CSV import (see
+// db.reconcileMissingCodes) — lets an admin fix any product still
+// missing a barcode/item code right now, from the running app, without
+// needing to restart the service. Wired to the Stock tab's Refresh
+// button on the client.
+router.post("/reconcile-codes", requireAdmin, (_req, res) => {
+  const barcodeIds = db.reconcileMissingBarcodes();
+  const itemCodeIds = db.reconcileMissingItemCodes();
+  res.json({ barcodeIds, itemCodeIds });
+});
+
 // Barcode lookup for the "scan to add to order" flow. Any authenticated
 // user can look up (read-only, same posture as GET / above).
 router.get("/barcode/:code", (req, res) => {

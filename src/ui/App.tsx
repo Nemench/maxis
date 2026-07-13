@@ -2343,10 +2343,29 @@ function StockPanel({ products, currentUser, onChanged }: { products: Product[];
   const canEditCatalog = currentUser.role === "admin";
   const [view, setView] = useState<"catalog" | "count" | "yields">(canEditCatalog ? "catalog" : "count");
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState("");
 
+  // Reconciliation (auto-generating any missing barcode/item code) only
+  // otherwise runs at server startup and after a CSV import — this lets
+  // an admin fix it right now, from the running app, without needing
+  // someone to restart the service first. stock_taker accounts can't
+  // edit the catalog so skip straight to a plain refetch for them (the
+  // endpoint is admin-only server-side too).
   const refreshStock = async () => {
-    setRefreshing(true);
-    try { await onChanged(); } finally { setRefreshing(false); }
+    setRefreshing(true); setRefreshMsg("");
+    try {
+      if (canEditCatalog) {
+        const { barcodeIds, itemCodeIds } = await api.products.reconcileCodes();
+        const fixed = barcodeIds.length + itemCodeIds.length;
+        if (fixed > 0) setRefreshMsg(`Generated ${fixed} missing code${fixed === 1 ? "" : "s"}.`);
+      }
+      await onChanged();
+    } catch (err) {
+      setRefreshMsg(err instanceof Error ? err.message : "Could not refresh.");
+    } finally {
+      setRefreshing(false);
+      window.setTimeout(() => setRefreshMsg(""), 3500);
+    }
   };
 
   return (
@@ -2355,9 +2374,10 @@ function StockPanel({ products, currentUser, onChanged }: { products: Product[];
         {canEditCatalog && <button type="button" className={view === "catalog" ? "active" : "secondary"} onClick={() => setView("catalog")}>Catalog</button>}
         <button type="button" className={view === "count" ? "active" : "secondary"} onClick={() => setView("count")}>Count</button>
         <button type="button" className={view === "yields" ? "active" : "secondary"} onClick={() => setView("yields")}>Cut Estimates</button>
-        <button type="button" className="secondary" onClick={() => void refreshStock()} disabled={refreshing} title="Reload stock from the server">
+        <button type="button" className="secondary" onClick={() => void refreshStock()} disabled={refreshing} title="Reload stock from the server (and generate any missing barcode/item code)">
           <RefreshCw size={16} className={refreshing ? "spin" : ""} /> {refreshing ? "Refreshing…" : "Refresh"}
         </button>
+        {refreshMsg && <span className="settings-hint">{refreshMsg}</span>}
       </div>
       {view === "catalog" && canEditCatalog && <Products products={products} onChanged={onChanged} />}
       {view === "count" && <StockTakePanel products={products} currentUser={currentUser} onChanged={onChanged} />}

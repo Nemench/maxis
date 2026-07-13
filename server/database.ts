@@ -247,7 +247,7 @@ export class KotDatabase {
       .prepare(`
         SELECT p.id, p.name, p.category, p.unitDefault, p.pricePerUnit, p.prepNotes, p.department, p.isActive,
                p.lowStockThreshold, COALESCE(SUM(ps.qty), 0) as onHandQty, p.lastCountedAt, p.lastCountedById,
-               p.barcode, p.isRawIntake, p.createdAt, p.updatedAt, ${KotDatabase.currentCostSql()}
+               p.barcode, p.itemCode, p.isRawIntake, p.createdAt, p.updatedAt, ${KotDatabase.currentCostSql()}
         FROM products p
         LEFT JOIN product_stock ps ON ps.productId = p.id
         WHERE p.isActive = 1
@@ -355,7 +355,7 @@ export class KotDatabase {
       .prepare(`
         SELECT p.id, p.name, p.category, p.unitDefault, p.pricePerUnit, p.prepNotes, p.department, p.isActive,
                p.lowStockThreshold, COALESCE(SUM(ps.qty), 0) as onHandQty, p.lastCountedAt, p.lastCountedById,
-               p.barcode, p.isRawIntake, p.createdAt, p.updatedAt, ${KotDatabase.currentCostSql()}
+               p.barcode, p.itemCode, p.isRawIntake, p.createdAt, p.updatedAt, ${KotDatabase.currentCostSql()}
         FROM products p
         LEFT JOIN product_stock ps ON ps.productId = p.id
         WHERE p.isActive = 1
@@ -484,7 +484,7 @@ export class KotDatabase {
       .prepare(`
         SELECT p.id, p.name, p.category, p.unitDefault, p.pricePerUnit, p.prepNotes, p.department, p.isActive,
                p.lowStockThreshold, COALESCE(SUM(ps.qty), 0) as onHandQty, p.lastCountedAt, p.lastCountedById,
-               p.barcode, p.isRawIntake, p.createdAt, p.updatedAt, ${KotDatabase.currentCostSql()}
+               p.barcode, p.itemCode, p.isRawIntake, p.createdAt, p.updatedAt, ${KotDatabase.currentCostSql()}
         FROM products p
         LEFT JOIN product_stock ps ON ps.productId = p.id
         WHERE p.isActive = 1 AND p.lowStockThreshold IS NOT NULL

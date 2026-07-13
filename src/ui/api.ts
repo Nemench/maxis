@@ -82,6 +82,7 @@ export const api = {
     getByItemCode: (code: string) => req<Product>("GET", `/products/item-code/${encodeURIComponent(code)}`),
     quickCreate: (data: QuickCreateProductInput) => req<Product>("POST", "/products/quick-create", data),
     missingCost: () => req<Product[]>("GET", "/products/missing-cost"),
+    reconcileCodes: () => req<{ barcodeIds: number[]; itemCodeIds: number[] }>("POST", "/products/reconcile-codes"),
     yieldEstimates: (rawProductId: number) => req<YieldEstimate[]>("GET", `/products/${rawProductId}/yield-estimates`),
     setYieldEstimates: (rawProductId: number, estimates: YieldEstimateInput[]) =>
       req<YieldEstimate[]>("PUT", `/products/${rawProductId}/yield-estimates`, estimates)
