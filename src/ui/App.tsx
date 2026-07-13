@@ -51,7 +51,7 @@ import { parseWeighBarcode, buildWeighBarcode } from "../shared/weighBarcode";
 import { generateInternalBarcode } from "../shared/internalBarcode";
 import { flattenBatch, totalBatchCount, placeOnSheets, type LabelBatchEntry } from "../shared/labelBatch";
 import { calculateLineTotal, buildCartLine } from "../shared/posCart";
-import { initScanBuffer, feedScanBuffer } from "../shared/scanBuffer";
+import { initScanBuffer, feedScanKey } from "../shared/scanBuffer";
 import type {
   CreateOrderInput,
   DeliveryAddress,
@@ -1041,44 +1041,64 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
     });
   };
 
-  // Global scanner-wedge capture: a hardware barcode scanner (USB or
-  // Bluetooth HID — both present to the OS as a plain keyboard) types its
-  // decoded digits as very fast, back-to-back keystrokes followed by
-  // Enter — nothing a human types matches that cadence, so
-  // feedScanBuffer (shared/scanBuffer.ts, unit-tested there against both
-  // fast and slow timing) distinguishes a real scan from ordinary typing
-  // without needing focus to sit in any particular field. Skipped while
-  // focus is in a genuine free-text field (buyer name/address/customer
-  // contact details) so a scan can never corrupt those, but works whether
-  // focus is on the search box, nowhere in particular, or the page body —
-  // exactly the "doesn't need to sit in a specific field" behavior asked
-  // for.
+  // Global scanner-wedge capture — the SINGLE authority for detecting a
+  // scan; there is no second, competing Enter-triggered handler anywhere
+  // else (the search input's onKeyDown was removed — see the input's own
+  // comment). A hardware barcode scanner (USB or Bluetooth HID — both
+  // present to the OS as a plain keyboard) types its decoded digits as
+  // very fast, back-to-back keystrokes followed by Enter — nothing a
+  // human types matches that cadence, so feedScanKey (shared/
+  // scanBuffer.ts, unit-tested there against both fast and slow timing)
+  // distinguishes a real scan from ordinary typing without needing focus
+  // to sit in any particular field.
+  //
+  // Every keystroke feedScanKey confirms as part of a burst is
+  // preventDefault'd, so a scan's digits never actually get typed into
+  // whatever's focused — EXCEPT the burst's first character, which is
+  // unavoidably typed before there's a second keystroke to compare
+  // timing against (see feedScanKey's own comment on burstConfirmed).
+  // The moment the second fast keystroke confirms it's really a burst,
+  // that stray first character is retroactively wiped from the search
+  // box (if that's what's focused) — in practice this happens within a
+  // single scan's ~10-50ms total duration, well before a human could
+  // perceive it.
+  //
+  // Skipped entirely while focus is in a genuine free-text field (buyer
+  // name/address/customer contact details) so a scan can never corrupt
+  // those, but works whether focus is on the search box, nowhere in
+  // particular, or the page body — the "doesn't need to sit in a
+  // specific field" behavior the spec asks for.
   useEffect(() => {
     const state = initScanBuffer();
 
     const onKeyDown = (e: KeyboardEvent) => {
       const active = document.activeElement;
-      const inProtectedField = active instanceof HTMLElement
+      const isSearchField = active instanceof HTMLElement && active.id === "pos-scan-search";
+      const inOtherProtectedField = active instanceof HTMLElement
         && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")
-        && active.id !== "pos-scan-search";
-      if (inProtectedField) { state.buffer = ""; return; }
+        && !isSearchField;
+      if (inOtherProtectedField) { state.buffer = ""; state.bursting = false; return; }
 
-      const completed = feedScanBuffer(state, e.key, Date.now());
-      if (completed) void handleScan(completed);
+      const result = feedScanKey(state, e.key, Date.now());
+      if (result.suppress) e.preventDefault();
+      if (result.burstConfirmed && isSearchField) setSearch("");
+      if (result.completedScan) void handleScan(result.completedScan);
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [products]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Shared by the global scanner-wedge listener and the manual search
-  // box's "Enter" fallback — a weigh-label decodes to an itemCode + the
-  // actual price that label was printed for (see parseWeighBarcode); a
-  // plain product barcode is looked up as-is. Gives an immediate audio +
-  // visual cue on success (see playScanBeep/flashLineIndex) since staff
-  // aren't necessarily watching the screen while scanning, and a brief,
-  // non-blocking inline message on failure rather than a modal that would
-  // stop them working.
+  // Called only from the global scanner-wedge listener above now (the
+  // search input's own Enter handler was removed — it raced against this
+  // exact function, which is what caused a scan to sometimes fire twice
+  // and never suppressed the raw digits from showing up in the box). A
+  // weigh-label decodes to an itemCode + the actual price that label was
+  // printed for (see parseWeighBarcode); a plain product barcode is
+  // looked up as-is. Gives an immediate audio + visual cue on success
+  // (see playScanBeep/flashLineIndex) since staff aren't necessarily
+  // watching the screen while scanning, and a brief, non-blocking inline
+  // message on failure rather than a modal that would stop them working.
   const handleScan = async (code: string) => {
     const weigh = parseWeighBarcode(code);
     const lookupCode = weigh ? weigh.itemCode : code;
@@ -1200,13 +1220,23 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
         <div className="pos-scan-panel">
           <label htmlFor="pos-scan-search" className="pos-scan-label">Scan or search a product</label>
           <div className="pos-search-row">
+            {/* No onKeyDown here — the global scanner-wedge listener
+                (see the useEffect above) is the single authority for
+                Enter-triggered scan completion. A second, independent
+                Enter handler here previously raced against it: neither
+                suppressed the browser's default typing, so a scan's
+                digits always ended up sitting in this field as literal
+                text, and a completed scan could fire handleScan twice.
+                onChange below is unaffected — normal (non-burst) typing
+                still updates `search` for the manual-fallback matches
+                list, since the global listener only preventDefaults
+                keystrokes it's confirmed are part of a fast burst. */}
             <input
               id="pos-scan-search"
               className="pos-search"
               placeholder="Scan a barcode, or type a name…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && search.trim()) void handleScan(search.trim()); }}
               autoFocus
             />
             <button type="button" className="secondary" onClick={() => { setReorderError(""); setReorderScanOpen(true); }} title="Scan a past receipt to add its items to this sale">
@@ -1291,7 +1321,12 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
         )}
       </div>
 
-      <div className="pos-receipt">
+      {/* Middle column — the till slip ONLY. This is the single source of
+          truth for what's in the current sale; nothing else on screen
+          duplicates or summarizes cart contents. Scrolls independently
+          (see .pos-slip-column's CSS) so a long sale never pushes the
+          keypad/payment column out of view. */}
+      <div className="pos-slip-column">
         <div className="till-slip">
           <div className="till-slip-header">
             <div className="till-slip-business">{receiptBranding.siteName || "NemenchPos"}</div>
@@ -1343,7 +1378,12 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
             <span>{currency.format(total)}</span>
           </div>
         </div>
+      </div>
 
+      {/* Right column — entry controls + checkout only. No receipt/cart
+          content lives here; the till slip is the middle column's job
+          exclusively. */}
+      <div className="pos-controls-column">
         <PosKeypad
           value={keypadValue}
           disabled={selectedLine == null}
