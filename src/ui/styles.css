@@ -805,6 +805,68 @@ th {
   margin: 0 0 8px;
 }
 
+/* The "X labels selected" count needs to be the most visually prominent
+   thing in the preview panel — it's the at-a-glance check that catches a
+   selection bug (wrong count = something's wrong) before a print job
+   wastes real labels. */
+.label-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.label-preview-header h2 {
+  margin: 0;
+}
+
+.label-preview-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 12px;
+}
+
+/* Batch list: one row per product added to the current print job. */
+.label-batch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.label-batch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.label-batch-row-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.label-batch-row-info strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.label-batch-weight,
+.label-batch-qty {
+  width: 64px;
+  flex-shrink: 0;
+}
+
 /* Single-label view is genuinely zoomed in (fixed width, not scaled to
    fit) so barcode/text legibility can actually be checked close-up. */
 .label-preview-frame {

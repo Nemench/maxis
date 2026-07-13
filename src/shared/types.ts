@@ -519,6 +519,12 @@ export interface LabelFormat {
   id: string;
   name: string;
   type: "thermal" | "a4_sheet";
+  // Which vendor's pre-cut sheet this matches (e.g. "Tower", "Avery") and
+  // that vendor's own product code (e.g. "W108", "L7160") — purely
+  // informational (grouping/labelling in the format picker), never used
+  // in the layout math itself.
+  brand: string | null;
+  code: string | null;
   widthMm: number;
   heightMm: number;
   sheetCols: number | null;
@@ -527,6 +533,14 @@ export interface LabelFormat {
   marginLeftMm: number | null;
   gapXMm: number | null;
   gapYMm: number | null;
+  // The physical page a4_sheet labels are printed on — null means the
+  // long-standing default of 210x297mm (A4 portrait). Only non-null for
+  // formats that need something else: a US Letter sheet (215.9x279.4mm,
+  // e.g. the Avery 5xxx presets) or an A4 sheet used in landscape
+  // (297x210mm, e.g. Tower W111's long, narrow labels which only fit
+  // that way around).
+  pageWidthMm: number | null;
+  pageHeightMm: number | null;
 }
 
 // Input to the label renderers — resolved from a Product plus whatever

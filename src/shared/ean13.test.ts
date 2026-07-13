@@ -56,4 +56,17 @@ describe("generateInternalBarcode", () => {
     const code = generateInternalBarcode(550); // same numeric ID as the real PLU "00550" used elsewhere
     expect(parseWeighBarcode(code)).toBeNull();
   });
+
+  it("carries a valid EAN-13 check digit across the full range of product IDs", () => {
+    // Sampled rather than exhaustive over all 100,000 IDs (0-99999) — every
+    // 37th ID plus both endpoints, enough to catch any off-by-one in the
+    // digit-position/odd-even weighting without a slow 100k-iteration test.
+    const ids = [0, 1, 99999];
+    for (let id = 0; id <= 99999; id += 37) ids.push(id);
+    for (const id of ids) {
+      const code = generateInternalBarcode(id);
+      expect(code).toMatch(/^\d{13}$/);
+      expect(Number(code[12])).toBe(ean13CheckDigit(code.slice(0, 12)));
+    }
+  });
 });

@@ -47,6 +47,7 @@ import JsBarcode from "jsbarcode";
 import { appSettings } from "../shared/settings";
 import { parseWeighBarcode, buildWeighBarcode } from "../shared/weighBarcode";
 import { generateInternalBarcode } from "../shared/internalBarcode";
+import { flattenBatch, totalBatchCount, placeOnSheets, type LabelBatchEntry } from "../shared/labelBatch";
 import type {
   CreateOrderInput,
   DeliveryAddress,
@@ -2019,27 +2020,45 @@ function ConsolidationPanel({ printStyle, printerMap }: { printStyle: string; pr
 
 const LAST_LABEL_FORMAT_KEY = "nemenchpos-last-label-format";
 
-// Pick a product, enter its weight (if it's sold by weight) and a
-// quantity, choose a format, and print — a live preview (see
-// LabelPreview) reflects every change instantly since it's just a normal
-// React re-render, no separate "preview" step. See buildThermalPrintHtml/
-// buildA4SheetHtml for the actual print output these preview from.
+// One row in the on-screen batch: a product plus how many copies and
+// (for a weighed product) what weight to print it at. Kept separate from
+// LabelBatchEntry (shared/labelBatch.ts) since the row needs raw form
+// state (the weight as a string mid-edit) — batchEntries below derives
+// the real LabelBatchEntry[] from this every render, so print/preview
+// always read the CURRENT rows, never a stale snapshot taken at some
+// earlier point (the exact class of bug a selection feature like this
+// usually has: printing from a copy of the selection instead of the live one).
+interface LabelBatchRow {
+  id: string;
+  product: Product;
+  weightKgText: string;
+  quantity: number;
+}
+
+// Search, add one or more products to a batch (each with its own
+// quantity, and weight if sold by weight), pick a sheet/roll format, and
+// print — a live preview (see LabelPreview) reflects every change
+// instantly since it's just a normal React re-render off the same
+// `batchEntries` the print button reads from, not a separate "preview"
+// step that could drift out of sync with what actually prints.
 function PrintLabelsPanel({ products }: { products: Product[] }) {
   const [search, setSearch] = useState("");
-  const [selected, setSelected] = useState<Product | null>(null);
-  const [weightKg, setWeightKg] = useState("");
-  const [quantity, setQuantity] = useState(1);
+  const [rows, setRows] = useState<LabelBatchRow[]>([]);
   const [formats, setFormats] = useState<LabelFormat[]>([]);
   const [formatId, setFormatId] = useState("");
   const [blockedPositions, setBlockedPositions] = useState<Set<number>>(new Set());
+  const [alignmentMode, setAlignmentMode] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    api.labels.formats().then((list) => {
+    Promise.all([api.labels.formats(), api.settings.get().catch(() => ({} as Record<string, string>))]).then(([list, settings]) => {
       setFormats(list);
+      // Priority: whatever this browser last used > the admin-configured
+      // "sheet currently loaded in the printer" default (Settings >
+      // Printing) > just the first format in the list.
       const remembered = localStorage.getItem(LAST_LABEL_FORMAT_KEY);
-      const initial = list.find((f) => f.id === remembered) ?? list[0];
+      const initial = list.find((f) => f.id === remembered) ?? list.find((f) => f.id === settings.activeLabelSheetFormat) ?? list[0];
       if (initial) setFormatId(initial.id);
     }).catch(() => undefined);
   }, []);
@@ -2050,24 +2069,40 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
     return products.filter((p) => p.name.toLowerCase().includes(q) || (p.barcode ?? "").includes(q) || (p.itemCode ?? "").includes(q)).slice(0, 20);
   }, [products, search]);
 
-  const selectProduct = (p: Product) => {
-    setSelected(p);
+  const addProduct = (p: Product) => {
+    setRows((cur) => [...cur, { id: `${p.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, product: p, weightKgText: "", quantity: 1 }]);
     setSearch("");
-    setWeightKg("");
     setMessage("");
   };
 
-  const format = formats.find((f) => f.id === formatId) ?? null;
-  const isWeighed = selected ? selected.unitDefault !== "qty" : false;
+  const updateRow = (id: string, patch: Partial<Pick<LabelBatchRow, "weightKgText" | "quantity">>) => {
+    setRows((cur) => cur.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  };
 
-  const data: LabelData | null = selected ? {
-    name: selected.name,
-    barcode: selected.barcode ?? "",
-    itemCode: selected.itemCode,
-    pricePerUnit: selected.pricePerUnit,
-    unitDefault: selected.unitDefault,
-    weightKg: isWeighed && weightKg ? Number(weightKg) : null
-  } : null;
+  const removeRow = (id: string) => {
+    setRows((cur) => cur.filter((r) => r.id !== id));
+  };
+
+  const format = formats.find((f) => f.id === formatId) ?? null;
+
+  // The single source of truth both the preview and the print button read
+  // from — derived fresh from `rows` on every render, so there's no
+  // separate "captured selection" that could go stale between selecting
+  // products and clicking print.
+  const batchEntries: LabelBatchEntry[] = useMemo(() => rows.map((r) => {
+    const isWeighed = r.product.unitDefault !== "qty";
+    const data: LabelData = {
+      name: r.product.name,
+      barcode: r.product.barcode ?? "",
+      itemCode: r.product.itemCode,
+      pricePerUnit: r.product.pricePerUnit,
+      unitDefault: r.product.unitDefault,
+      weightKg: isWeighed && r.weightKgText ? Number(r.weightKgText) : null
+    };
+    return { id: r.id, data, quantity: r.quantity };
+  }), [rows]);
+
+  const totalCount = totalBatchCount(batchEntries);
 
   const changeFormat = (id: string) => {
     setFormatId(id);
@@ -2084,15 +2119,20 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
   };
 
   const print = () => {
-    if (!data || !format) return;
-    if (isWeighed && !selected?.itemCode) { setMessage("This product has no item code yet — add one in Stock before printing labels for it."); return; }
-    if (!isWeighed && !selected?.barcode) { setMessage("This product has no barcode yet — add one in Stock before printing labels for it."); return; }
-    if (isWeighed && !weightKg) { setMessage("Enter the weighed amount first."); return; }
+    if (!format || rows.length === 0) return;
+    for (const r of rows) {
+      const isWeighed = r.product.unitDefault !== "qty";
+      if (isWeighed && !r.product.itemCode) { setMessage(`${r.product.name} has no item code yet — add one in Stock before printing.`); return; }
+      if (isWeighed && !r.weightKgText) { setMessage(`Enter the weighed amount for ${r.product.name} first.`); return; }
+      if (!isWeighed && !r.product.barcode) { setMessage(`${r.product.name} has no barcode yet — add one in Stock before printing.`); return; }
+      if (r.quantity < 1) { setMessage(`${r.product.name} needs a quantity of at least 1.`); return; }
+    }
     setPrinting(true); setMessage("");
     try {
+      const flat = flattenBatch(batchEntries);
       const html = format.type === "thermal"
-        ? buildThermalPrintHtml(data, format, quantity)
-        : buildA4SheetHtml(data, format, quantity, blockedPositions);
+        ? buildThermalPrintHtml(flat, format)
+        : buildA4SheetHtml(flat, format, blockedPositions);
       printHtml(applyColorMode(html));
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Could not build the label print job.");
@@ -2101,63 +2141,85 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
     }
   };
 
+  const formatsByBrand = useMemo(() => {
+    const groups = new Map<string, LabelFormat[]>();
+    for (const f of formats) {
+      const key = f.brand ?? "Other";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(f);
+    }
+    return groups;
+  }, [formats]);
+
   return (
     <div className="products-layout">
       <div className="panel">
         <h2>Print Labels</h2>
-        {!selected ? (
-          <>
-            <input placeholder="Search products by name or barcode…" value={search} onChange={(e) => setSearch(e.target.value)} autoFocus />
-            {matches.length > 0 && (
-              <div className="print-labels-matches">
-                {matches.map((p) => (
-                  <button type="button" key={p.id} className="secondary" onClick={() => selectProduct(p)}>
-                    {p.name} {p.barcode ? <span className="muted">({p.barcode})</span> : <span className="muted">(no barcode)</span>}
-                  </button>
-                ))}
-              </div>
-            )}
-            {search.trim() && matches.length === 0 && <p className="settings-hint">No products match.</p>}
-          </>
-        ) : (
-          <>
-            <div className="setting-row">
-              <div className="setting-info">
-                <strong>{selected.name}</strong>
-                <p>{selected.pricePerUnit != null ? `${currency.format(selected.pricePerUnit)}${isWeighed ? "/kg" : ""}` : "No price set"} - {isWeighed ? (selected.itemCode || "No item code") : (selected.barcode || "No barcode")}</p>
-              </div>
-              <button type="button" className="secondary" onClick={() => setSelected(null)}>Change product</button>
-            </div>
-
-            {isWeighed && (
-              <label>Weighed amount (kg)
-                <input type="number" min="0" step="0.001" value={weightKg} onChange={(e) => setWeightKg(e.target.value)} placeholder="e.g. 0.845" autoFocus />
-              </label>
-            )}
-
-            <label>Quantity
-              <input type="number" min="1" max="5000" value={quantity} onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))} />
-            </label>
-
-            <label>Label format
-              <select value={formatId} onChange={(e) => changeFormat(e.target.value)}>
-                {formats.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
-              </select>
-            </label>
-
-            {message && <p className="form-error">{message}</p>}
-
-            <footer className="actions">
-              <button type="button" disabled={printing || !format || (isWeighed && !weightKg)} onClick={print}>
-                <Printer size={16} /> {printing ? "Printing…" : "Print labels"}
+        <input placeholder="Search products by name, barcode or item code…" value={search} onChange={(e) => setSearch(e.target.value)} autoFocus />
+        {matches.length > 0 && (
+          <div className="print-labels-matches">
+            {matches.map((p) => (
+              <button type="button" key={p.id} className="secondary" onClick={() => addProduct(p)}>
+                {p.name} {p.barcode ? <span className="muted">({p.barcode})</span> : p.itemCode ? <span className="muted">({p.itemCode})</span> : <span className="muted">(no code)</span>}
               </button>
-            </footer>
-          </>
+            ))}
+          </div>
         )}
+        {search.trim() && matches.length === 0 && <p className="settings-hint">No products match.</p>}
+
+        {rows.length > 0 && (
+          <div className="label-batch-list">
+            {rows.map((r) => {
+              const isWeighed = r.product.unitDefault !== "qty";
+              return (
+                <div className="label-batch-row" key={r.id}>
+                  <div className="label-batch-row-info">
+                    <strong>{r.product.name}</strong>
+                    <span className="muted">
+                      {r.product.pricePerUnit != null ? `${currency.format(r.product.pricePerUnit)}${isWeighed ? "/kg" : ""}` : "No price set"}
+                      {" · "}
+                      {isWeighed ? (r.product.itemCode || "No item code") : (r.product.barcode || "No barcode")}
+                    </span>
+                  </div>
+                  {isWeighed && (
+                    <input type="number" min="0" step="0.001" className="label-batch-weight" placeholder="kg" value={r.weightKgText} onChange={(e) => updateRow(r.id, { weightKgText: e.target.value })} />
+                  )}
+                  <input type="number" min="1" max="5000" className="label-batch-qty" value={r.quantity} onChange={(e) => updateRow(r.id, { quantity: Math.max(1, Number(e.target.value) || 1) })} />
+                  <button type="button" className="icon-button danger" onClick={() => removeRow(r.id)} title="Remove from batch" aria-label="Remove from batch"><Trash2 size={16} /></button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <label>Label / sticker sheet format
+          <select value={formatId} onChange={(e) => changeFormat(e.target.value)}>
+            {[...formatsByBrand.entries()].map(([brand, list]) => (
+              <optgroup key={brand} label={brand}>
+                {list.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+              </optgroup>
+            ))}
+          </select>
+        </label>
+
+        {message && <p className="form-error">{message}</p>}
+
+        <footer className="actions">
+          <button type="button" disabled={printing || !format || rows.length === 0} onClick={print}>
+            <Printer size={16} /> {printing ? "Printing…" : `Print ${totalCount} label${totalCount === 1 ? "" : "s"}`}
+          </button>
+        </footer>
       </div>
 
-      {selected && data && format && (
-        <LabelPreview data={data} format={format} quantity={quantity} blockedPositions={blockedPositions} onToggleBlocked={toggleBlockedPosition} />
+      {format && (
+        <LabelPreview
+          batch={batchEntries}
+          format={format}
+          blockedPositions={blockedPositions}
+          onToggleBlocked={toggleBlockedPosition}
+          alignmentMode={alignmentMode}
+          onToggleAlignmentMode={() => setAlignmentMode((v) => !v)}
+        />
       )}
     </div>
   );
@@ -3903,6 +3965,8 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
   // MANUAL print button click does once triggered.
   const [forcePreview, setForcePreview] = useState(false);
   const [colorMode, setColorMode] = useState<"color" | "grayscale">("color");
+  const [labelFormats, setLabelFormats] = useState<LabelFormat[]>([]);
+  const [activeLabelSheetFormat, setActiveLabelSheetFormat] = useState("");
   const [savingEmailConfig, setSavingEmailConfig] = useState(false);
   const [pendingEmailConfigSave, setPendingEmailConfigSave] = useState(false);
   const [testEmailTo, setTestEmailTo] = useState("");
@@ -3966,6 +4030,7 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
       setPublicBaseUrl(s.publicBaseUrl ?? "");
       setForcePreview(s.printForcePreview === "true");
       setColorMode(s.printColorMode === "grayscale" ? "grayscale" : "color");
+      setActiveLabelSheetFormat(s.activeLabelSheetFormat ?? "");
       // Pre-select the matching provider preset on load, so returning to
       // this screen doesn't just show "Other/custom" for a Gmail account
       // that was already set up.
@@ -3973,6 +4038,7 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
       setEmailProvider(matchedProvider ?? (s.emailSmtpHost ? "custom" : "gmail"));
     }).catch(() => undefined);
     api.stock.locations.list().then(setStockLocations).catch(() => undefined);
+    api.labels.formats().then(setLabelFormats).catch(() => undefined);
   }, []);
 
   const saveHistoryDays = async (days: number) => {
@@ -4144,6 +4210,13 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
     window.setTimeout(() => setMsg(""), 2500);
   };
 
+  const changeActiveLabelSheetFormat = async (id: string) => {
+    setActiveLabelSheetFormat(id);
+    await api.settings.set({ activeLabelSheetFormat: id });
+    setMsg("Default sticker sheet updated");
+    window.setTimeout(() => setMsg(""), 2500);
+  };
+
   const changePrinter = async (key: string, value: string) => {
     await api.settings.set({ [key]: value });
     onPrinterMapChange({ ...printerMap, [key.replace("Printer", "")]: value } as { kitchen: string; counter: string; master: string });
@@ -4252,6 +4325,20 @@ function SettingsPanel({ autoPrint, onAutoPrintChange, printStyle, onPrintStyleC
           <select className="settings-select" value={colorMode} onChange={(e) => void changeColorMode(e.target.value as "color" | "grayscale")}>
             <option value="color">Color</option>
             <option value="grayscale">Black &amp; white</option>
+          </select>
+        </div>
+        <div className="setting-row">
+          <div className="setting-info">
+            <strong>Sticker sheet currently loaded</strong>
+            <p>Which label/sticker sheet is physically in the printer right now — Print Labels defaults to this until someone picks a different one for a specific job.</p>
+          </div>
+          <select className="settings-select" value={activeLabelSheetFormat} onChange={(e) => void changeActiveLabelSheetFormat(e.target.value)}>
+            <option value="">— Not set —</option>
+            {[...new Map(labelFormats.map((f) => [f.brand ?? "Other", true])).keys()].map((brand) => (
+              <optgroup key={brand} label={brand}>
+                {labelFormats.filter((f) => (f.brand ?? "Other") === brand).map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+              </optgroup>
+            ))}
           </select>
         </div>
       </section>
@@ -5717,96 +5804,118 @@ function buildLabelCellHtml(data: LabelData, widthMm: number, heightMm: number):
   </div>`;
 }
 
-// Thermal: one label per physical print, repeated `copies` times on
-// successive forced page-breaks — correct for a continuous roll (each
-// break advances one label) and equally fine on a cut-sheet printer. Also
-// used (with copies=1) for the live preview's zoomed single-label view,
-// regardless of which format type is actually selected — a single cell's
-// own dimensions are exactly widthMm/heightMm either way.
-function buildThermalPrintHtml(data: LabelData, format: LabelFormat, copies: number): string {
-  const n = Math.min(Math.max(1, Math.round(copies) || 1), 500);
-  const cell = buildLabelCellHtml(data, format.widthMm, format.heightMm);
-  const pages = Array.from({ length: n }, (_, i) => (i === 0 ? cell : `<div style="page-break-before:always">${cell}</div>`)).join("");
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(data.name)} label</title><style>
+// Thermal: one label per physical print, each entry in `items` (already
+// expanded to one row per copy — see flattenBatch) on its own forced
+// page-break — correct for a continuous roll (each break advances one
+// label) and equally fine on a cut-sheet printer. Different products can
+// be mixed in one run (a batch print job isn't restricted to one product
+// at a time) since each item carries its own label data.
+function buildThermalPrintHtml(items: LabelData[], format: LabelFormat): string {
+  const capped = items.slice(0, 2000);
+  if (capped.length === 0) {
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body></body></html>`;
+  }
+  const pages = capped.map((data, i) => {
+    const cell = buildLabelCellHtml(data, format.widthMm, format.heightMm);
+    return i === 0 ? cell : `<div style="page-break-before:always">${cell}</div>`;
+  }).join("");
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Labels (${capped.length})</title><style>
 @page{size:${format.widthMm}mm ${format.heightMm}mm;margin:0}*{box-sizing:border-box;margin:0;padding:0}
 body{background:#fff;color:#000}
 ${LABEL_CELL_STYLE}
 </style></head><body>${pages}</body></html>`;
 }
 
-// A4 sheet: labels fill a fixed rows x cols grid per page, in reading
-// order (left-to-right, top-to-bottom). `blockedPositions` (1-based cell
-// numbers, reading order) marks cells already peeled off a physical sheet
-// — those are skipped on the FIRST sheet only, so a partially-used sheet
-// can be reused for exactly its remaining gaps rather than wasting them
-// or requiring the gaps to be a contiguous run from the top-left. Every
-// sheet after the first is a fresh, fully-available one. Renders every
-// sheet needed to fit `quantity` labels, one sheet per printed page.
-function buildA4SheetHtml(data: LabelData, format: LabelFormat, quantity: number, blockedPositions: ReadonlySet<number>): string {
+// A4/Letter sheet: labels fill a fixed rows x cols grid per page, in
+// reading order (left-to-right, top-to-bottom), pulling from `items` in
+// order — a mixed-product batch prints as one continuous stream across
+// however many sheets it takes, not restricted to one product per sheet.
+// `blockedPositions` (1-based cell numbers, reading order) marks cells
+// already peeled off a physical sheet — those are skipped on the FIRST
+// sheet only (see placeOnSheets), so a partially-used sheet can be reused
+// for exactly its remaining gaps. The physical page itself defaults to
+// A4 portrait (210x297mm) unless the format specifies otherwise (US
+// Letter, or an A4 sheet used in landscape — see LabelFormat's schema
+// comment in shared/types.ts).
+function buildA4SheetHtml(items: LabelData[], format: LabelFormat, blockedPositions: ReadonlySet<number>): string {
   if (format.type !== "a4_sheet" || !format.sheetCols || !format.sheetRows) {
     throw new Error("buildA4SheetHtml requires an a4_sheet format with sheetCols/sheetRows set");
   }
   const perSheet = format.sheetCols * format.sheetRows;
-  const n = Math.min(Math.max(0, Math.round(quantity) || 0), 5000);
-  const available1 = Math.max(0, perSheet - blockedPositions.size);
-  const sheets = Math.max(1, available1 >= n ? 1 : 1 + Math.ceil((n - available1) / perSheet));
-  const cell = buildLabelCellHtml(data, format.widthMm, format.heightMm);
+  const sheets = placeOnSheets(items.slice(0, 5000), perSheet, blockedPositions);
   const gapX = format.gapXMm ?? 0;
   const gapY = format.gapYMm ?? 0;
+  const pageW = format.pageWidthMm ?? 210;
+  const pageH = format.pageHeightMm ?? 297;
 
-  let placed = 0;
-  const pages: string[] = [];
-  for (let s = 0; s < sheets; s++) {
-    const cells: string[] = [];
-    for (let pos = 1; pos <= perSheet; pos++) {
-      const isBlocked = s === 0 && blockedPositions.has(pos);
-      const isFilled = !isBlocked && placed < n;
-      cells.push(isFilled ? cell : `<div class="label-empty"></div>`);
-      if (isFilled) placed++;
-    }
-    pages.push(`<div class="sheet"${s > 0 ? ' style="page-break-before:always"' : ""}>${cells.join("")}</div>`);
-  }
+  const pages = sheets.map((sheet, s) => {
+    const cells = sheet.map((data) => data ? buildLabelCellHtml(data, format.widthMm, format.heightMm) : `<div class="label-empty"></div>`).join("");
+    return `<div class="sheet"${s > 0 ? ' style="page-break-before:always"' : ""}>${cells}</div>`;
+  }).join("");
 
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(data.name)} labels (${n})</title><style>
-@page{size:A4;margin:0}*{box-sizing:border-box;margin:0;padding:0}
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Labels (${items.length})</title><style>
+@page{size:${pageW}mm ${pageH}mm;margin:0}*{box-sizing:border-box;margin:0;padding:0}
 body{background:#fff;color:#000}
-.sheet{width:210mm;height:297mm;padding:${format.marginTopMm}mm 0 0 ${format.marginLeftMm}mm;display:grid;grid-template-columns:repeat(${format.sheetCols},${format.widthMm}mm);grid-template-rows:repeat(${format.sheetRows},${format.heightMm}mm);column-gap:${gapX}mm;row-gap:${gapY}mm}
+.sheet{width:${pageW}mm;height:${pageH}mm;padding:${format.marginTopMm ?? 0}mm 0 0 ${format.marginLeftMm ?? 0}mm;display:grid;grid-template-columns:repeat(${format.sheetCols},${format.widthMm}mm);grid-template-rows:repeat(${format.sheetRows},${format.heightMm}mm);column-gap:${gapX}mm;row-gap:${gapY}mm}
 .label-empty{width:${format.widthMm}mm;height:${format.heightMm}mm}
 ${LABEL_CELL_STYLE}
-</style></head><body>${pages.join("")}</body></html>`;
+</style></head><body>${pages}</body></html>`;
 }
 
-// CSS reference pixels for an A4 page (1mm = 96/25.4px, same fixed ratio
-// the browser itself uses to lay out the "mm" units in the printed HTML,
-// so this is exact regardless of the viewer's actual screen DPI).
-const A4_PX_W = (210 * 96) / 25.4;
-const A4_PX_H = (297 * 96) / 25.4;
+// Blank grid — no barcode/name/price, just the cell outlines — so a
+// physical alignment check can be run on scrap paper without burning a
+// real batch's worth of data (and without needing any product selected
+// at all). One sheet only; blockedPositions doesn't apply here since the
+// whole point is checking where every cell on a FRESH sheet lands.
+function buildAlignmentSheetHtml(format: LabelFormat): string {
+  if (format.type !== "a4_sheet" || !format.sheetCols || !format.sheetRows) {
+    throw new Error("buildAlignmentSheetHtml requires an a4_sheet format with sheetCols/sheetRows set");
+  }
+  const perSheet = format.sheetCols * format.sheetRows;
+  const gapX = format.gapXMm ?? 0;
+  const gapY = format.gapYMm ?? 0;
+  const pageW = format.pageWidthMm ?? 210;
+  const pageH = format.pageHeightMm ?? 297;
+  const cells = Array.from({ length: perSheet }, () => `<div class="label-align-box"></div>`).join("");
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Alignment check</title><style>
+@page{size:${pageW}mm ${pageH}mm;margin:0}*{box-sizing:border-box;margin:0;padding:0}
+body{background:#fff;color:#000}
+.sheet{width:${pageW}mm;height:${pageH}mm;padding:${format.marginTopMm ?? 0}mm 0 0 ${format.marginLeftMm ?? 0}mm;display:grid;grid-template-columns:repeat(${format.sheetCols},${format.widthMm}mm);grid-template-rows:repeat(${format.sheetRows},${format.heightMm}mm);column-gap:${gapX}mm;row-gap:${gapY}mm}
+.label-align-box{width:${format.widthMm}mm;height:${format.heightMm}mm;border:0.5pt dashed #000;box-sizing:border-box}
+</style></head><body><div class="sheet">${cells}</div></body></html>`;
+}
 
 // The sheet preview used to size its iframe by CSS alone (max-width:420px
 // on the wrapper) while the iframe's *content* was the real, physically-
-// sized A4 HTML — a browser doesn't shrink an iframe's content to fit a
+// sized page HTML — a browser doesn't shrink an iframe's content to fit a
 // small frame, so in practice most of the sheet was just clipped off
 // rather than "previewed". Fixing that means actually rendering the
-// iframe at true A4 size and scaling the whole thing down with a CSS
-// transform, recomputed on resize so it always exactly fills whatever
-// width the panel gives it.
-function ScaledA4Frame({ srcDoc }: { srcDoc: string }) {
+// iframe at true page size (whatever page size THIS format actually
+// uses — A4, Letter, or landscape) and scaling the whole thing down with
+// a CSS transform, recomputed on resize so it always exactly fills
+// whatever width the panel gives it.
+function ScaledSheetFrame({ srcDoc, pageWidthMm, pageHeightMm }: { srcDoc: string; pageWidthMm: number; pageHeightMm: number }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
+  // CSS reference pixels (1mm = 96/25.4px, the same fixed ratio the
+  // browser itself uses to lay out "mm" units), so this is exact
+  // regardless of the viewer's actual screen DPI.
+  const pxW = (pageWidthMm * 96) / 25.4;
+  const pxH = (pageHeightMm * 96) / 25.4;
 
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const update = () => setScale(el.clientWidth > 0 ? el.clientWidth / A4_PX_W : 1);
+    const update = () => setScale(el.clientWidth > 0 ? el.clientWidth / pxW : 1);
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [pxW]);
 
   return (
-    <div ref={wrapRef} className="label-preview-frame label-preview-frame-a4">
-      <iframe title="Sheet preview" srcDoc={srcDoc} style={{ width: `${A4_PX_W}px`, height: `${A4_PX_H}px`, transform: `scale(${scale})` }} />
+    <div ref={wrapRef} className="label-preview-frame label-preview-frame-a4" style={{ aspectRatio: `${pageWidthMm} / ${pageHeightMm}` }}>
+      <iframe title="Sheet preview" srcDoc={srcDoc} style={{ width: `${pxW}px`, height: `${pxH}px`, transform: `scale(${scale})` }} />
     </div>
   );
 }
@@ -5836,48 +5945,78 @@ function SheetPositionPicker({ cols, rows, blocked, onToggle }: { cols: number; 
 
 // Reuses the exact same HTML the print button will send — an iframe
 // showing real generated markup, not a parallel React re-implementation
-// that could drift from what actually prints. Two views: a zoomed single
-// label (always), and for a4_sheet formats, the first sheet's full grid
-// (enough to verify alignment/blocked-position skipping without rendering
-// every page of a large run into hidden iframes).
-function LabelPreview({ data, format, quantity, blockedPositions, onToggleBlocked }: { data: LabelData; format: LabelFormat; quantity: number; blockedPositions: Set<number>; onToggleBlocked: (pos: number) => void }) {
-  const singleHtml = useMemo(() => buildThermalPrintHtml(data, format, 1), [data, format]);
+// that could drift from what actually prints. Three views: a prominent
+// "X labels selected" count (so a selection bug is obvious at a glance
+// rather than only discoverable after printing), a zoomed single-label
+// view of the first item in the batch, and for a4_sheet formats, the
+// first sheet's full grid — either showing the real batch content, or (in
+// alignment mode) a blank grid of cell outlines for test-printing on
+// scrap paper without needing any product selected at all.
+function LabelPreview({ batch, format, blockedPositions, onToggleBlocked, alignmentMode, onToggleAlignmentMode }: {
+  batch: LabelBatchEntry[];
+  format: LabelFormat;
+  blockedPositions: Set<number>;
+  onToggleBlocked: (pos: number) => void;
+  alignmentMode: boolean;
+  onToggleAlignmentMode: () => void;
+}) {
+  const flat = useMemo(() => flattenBatch(batch), [batch]);
+  const totalCount = flat.length;
+  const pageWidthMm = format.pageWidthMm ?? 210;
+  const pageHeightMm = format.pageHeightMm ?? 297;
 
-  const perSheet = format.type === "a4_sheet" && format.sheetCols && format.sheetRows ? format.sheetCols * format.sheetRows : 1;
-  const available1 = Math.max(0, perSheet - blockedPositions.size);
-  const sheetsNeeded = format.type === "a4_sheet" ? Math.max(1, available1 >= quantity ? 1 : 1 + Math.ceil((Math.max(1, quantity) - available1) / perSheet)) : Math.max(1, quantity);
+  const singleHtml = useMemo(() => flat.length > 0 ? buildThermalPrintHtml(flat.slice(0, 1), format) : "", [flat, format]);
+
+  const perSheet = format.type === "a4_sheet" && format.sheetCols && format.sheetRows ? format.sheetCols * format.sheetRows : 0;
+  const sheetsNeeded = useMemo(() => perSheet > 0 ? placeOnSheets(flat, perSheet, blockedPositions).length : 0, [flat, perSheet, blockedPositions]);
 
   const sheetHtml = useMemo(() => {
-    if (format.type !== "a4_sheet") return "";
+    if (format.type !== "a4_sheet" || perSheet === 0) return "";
+    if (alignmentMode) return buildAlignmentSheetHtml(format);
     // Only render enough labels to fill page 1 — the preview only ever
     // shows that page, so there's no reason to build (and hide) HTML for
-    // sheets 2..N of a large run.
-    const page1Quantity = Math.min(Math.max(0, quantity), available1);
-    return buildA4SheetHtml(data, format, page1Quantity, blockedPositions);
-  }, [data, format, quantity, blockedPositions, available1]);
+    // sheets 2..N of a large batch.
+    const available1 = Math.max(0, perSheet - blockedPositions.size);
+    return buildA4SheetHtml(flat.slice(0, available1), format, blockedPositions);
+  }, [format, perSheet, alignmentMode, flat, blockedPositions]);
 
   return (
     <div className="panel label-preview">
+      <div className="label-preview-header">
+        <h2>{totalCount} label{totalCount === 1 ? "" : "s"} selected</h2>
+        {format.type === "a4_sheet" && perSheet > 0 && (
+          <button type="button" className={alignmentMode ? "toggle-on" : "toggle-off"} onClick={onToggleAlignmentMode}>
+            {alignmentMode ? "Showing blank alignment grid" : "Check alignment"}
+          </button>
+        )}
+      </div>
+
       <div className="label-preview-single">
         <h3>Single label</h3>
         <div className="label-preview-frame" style={{ aspectRatio: `${format.widthMm} / ${format.heightMm}` }}>
-          <iframe title="Label preview" srcDoc={singleHtml} />
+          {singleHtml ? <iframe title="Label preview" srcDoc={singleHtml} /> : <div className="label-preview-empty">Add a product below to preview</div>}
         </div>
       </div>
+
       {format.type === "a4_sheet" && format.sheetCols && format.sheetRows && (
         <div className="label-preview-sheet">
-          <h3>Sheet layout (page 1 of {sheetsNeeded})</h3>
-          <ScaledA4Frame srcDoc={sheetHtml} />
-          <p className="settings-hint">
-            Click a cell below to mark it as already used on a partially-used sheet — the print job will skip it and fill the remaining gaps instead.
-            {blockedPositions.size > 0 && ` (${blockedPositions.size} marked used)`}
-          </p>
-          <SheetPositionPicker cols={format.sheetCols} rows={format.sheetRows} blocked={blockedPositions} onToggle={onToggleBlocked} />
+          <h3>{alignmentMode ? "Blank grid — alignment check" : `Sheet layout (page 1 of ${Math.max(1, sheetsNeeded)})`}</h3>
+          <ScaledSheetFrame srcDoc={sheetHtml} pageWidthMm={pageWidthMm} pageHeightMm={pageHeightMm} />
+          {!alignmentMode && (
+            <>
+              <p className="settings-hint">
+                Click a cell below to mark it as already used on a partially-used sheet — the print job will skip it and fill the remaining gaps instead.
+                {blockedPositions.size > 0 && ` (${blockedPositions.size} marked used)`}
+              </p>
+              <SheetPositionPicker cols={format.sheetCols} rows={format.sheetRows} blocked={blockedPositions} onToggle={onToggleBlocked} />
+            </>
+          )}
         </div>
       )}
-      <p className="settings-hint">
-        {quantity} label{quantity === 1 ? "" : "s"}{format.type === "a4_sheet" ? ` = ${sheetsNeeded} sheet${sheetsNeeded === 1 ? "" : "s"}` : ""}
-      </p>
+
+      {!(format.type === "a4_sheet" && format.sheetCols && format.sheetRows) && (
+        <p className="settings-hint">{totalCount} label{totalCount === 1 ? "" : "s"} to print</p>
+      )}
     </div>
   );
 }

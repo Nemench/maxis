@@ -1465,6 +1465,18 @@ export class KotDatabase {
       if (!cols.includes("consolidationBarcode")) this.db.exec("ALTER TABLE orders ADD COLUMN consolidationBarcode TEXT");
     }
 
+    // Add brand/code/pageWidthMm/pageHeightMm to label_formats if missing
+    // (existing databases created before Tower/Avery preset support and
+    // landscape/Letter page sizes were added)
+    const labelFormatsExists = (this.db.prepare("SELECT COUNT(*) as n FROM sqlite_master WHERE type='table' AND name='label_formats'").get() as { n: number }).n > 0;
+    if (labelFormatsExists) {
+      const lfCols = (this.db.prepare("PRAGMA table_info(label_formats)").all() as { name: string }[]).map((c) => c.name);
+      if (!lfCols.includes("brand")) this.db.exec("ALTER TABLE label_formats ADD COLUMN brand TEXT");
+      if (!lfCols.includes("code")) this.db.exec("ALTER TABLE label_formats ADD COLUMN code TEXT");
+      if (!lfCols.includes("pageWidthMm")) this.db.exec("ALTER TABLE label_formats ADD COLUMN pageWidthMm REAL");
+      if (!lfCols.includes("pageHeightMm")) this.db.exec("ALTER TABLE label_formats ADD COLUMN pageHeightMm REAL");
+    }
+
     // Add html_body to email_outbox if missing (existing databases created
     // before HTML/receipt emails were added)
     const emailOutboxExists = (this.db.prepare("SELECT COUNT(*) as n FROM sqlite_master WHERE type='table' AND name='email_outbox'").get() as { n: number }).n > 0;
@@ -1744,11 +1756,17 @@ export class KotDatabase {
       -- hardcoded in the client, so a format can be corrected/added
       -- without a code change. sheetCols through gapYMm are only
       -- meaningful for type='a4_sheet' (null for 'thermal', which is
-      -- always exactly one label per physical print).
+      -- always exactly one label per physical print). pageWidthMm/
+      -- pageHeightMm are null for the default 210x297 A4-portrait page;
+      -- only set for a format that needs something else (US Letter, or an
+      -- A4 sheet used in landscape) — see LabelFormat's schema comment in
+      -- src/shared/types.ts.
       CREATE TABLE IF NOT EXISTS label_formats (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         type TEXT NOT NULL,
+        brand TEXT,
+        code TEXT,
         widthMm REAL NOT NULL,
         heightMm REAL NOT NULL,
         sheetCols INTEGER,
@@ -1757,6 +1775,8 @@ export class KotDatabase {
         marginLeftMm REAL,
         gapXMm REAL,
         gapYMm REAL,
+        pageWidthMm REAL,
+        pageHeightMm REAL,
         sortOrder INTEGER NOT NULL DEFAULT 0,
         createdAt TEXT NOT NULL
       );
@@ -1947,6 +1967,14 @@ export class KotDatabase {
     // the order. Blank by default; buildOrderMessage falls back to a
     // generic phrase if it's never set.
     this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('closingTime', '')").run();
+    // Which label_formats.id is physically loaded in the till's sticker
+    // printer right now — lets Print Labels default new sessions straight
+    // to the right sheet instead of everyone re-picking it every time.
+    // Deliberately blank by default rather than pre-picking a specific
+    // Tower/Avery code: this is site-specific (whatever sheet a given
+    // shop actually bought), so guessing wrong would be worse than
+    // leaving it unset until an admin picks one in Settings > Printing.
+    this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('activeLabelSheetFormat', '')").run();
 
     // Seed default order-notification message templates (see the
     // order_message_templates schema comment above) — INSERT OR IGNORE
@@ -1983,36 +2011,97 @@ export class KotDatabase {
     // Ryman, Rapesco, Q-Connet, HERMA, etc. all publish label sheets that
     // are pin-compatible with these Avery codes — "Avery-compatible" is
     // the industry-standard way these are described, not an Avery-specific
-    // format). a4_8/10/14/16/18/48 below were cross-checked against
-    // multiple independent published spec sheets for their Avery code
+    // format). a4_8/10/14/16/18/48 were cross-checked against multiple
+    // independent published spec sheets for their Avery code
     // (L7165/L7173/L7163/L7162/L7161/L7636) and the margins/gaps satisfy
     // cols*width + gaps ≈ 210mm and rows*height ≈ 297mm exactly, so these
     // should print true out of the box. a4_21/24/65 predate this and
     // haven't been re-verified the same way — if a sheet comes out
     // shifted, nudge its marginTopMm/marginLeftMm by a mm or two, same
     // caveat that applies to any label-template software.
+    //
+    // The "tw_XX" (Tower, the South African stationery brand) presets are
+    // built from Tower's published label-size + count-per-sheet chart.
+    // Where a Tower code's size/count exactly matches an Avery code we'd
+    // already cross-checked above (e.g. tw_w108 = a4_21/L7160, tw_w237 =
+    // a4_14/L7163), its margins/gaps are reused directly since they're the
+    // same physical layout under a different brand name. Every other
+    // tw_XX's margins are only computed from "cols*width + gaps ≈ 210mm,
+    // rows*height ≈ 297mm assuming a 0mm gap" — NOT verified against a
+    // real printed sheet or Tower's own official template, since none of
+    // those were available to check against here. TODO: before a bulk
+    // print run on any tw_XX format that doesn't cite a matching Avery
+    // code below, print one test sheet against real Tower stock first and
+    // nudge marginTopMm/marginLeftMm/gapXMm if it's off.
+    //
+    // The "av_XX" (Avery, international/US Letter) presets are for
+    // reference/compatibility only — note pageWidthMm/pageHeightMm are
+    // set to US Letter (215.9 x 279.4mm), NOT A4, since that's the actual
+    // paper size these Avery codes are designed for; printing one on A4
+    // paper will NOT line up. Margins follow Avery's well-documented US
+    // Letter convention (0.5in top/bottom, 0.25in or 0.19in sides, small
+    // column gaps) cross-checked against the label's own published
+    // width/height/count math; av_5167's side margin is a rougher
+    // estimate (TODO: verify against Avery's own template before a bulk
+    // run — its 4-narrow-column layout is less standardized than the
+    // others here).
     const seedLabelFormat = this.db.prepare(
-      "INSERT OR IGNORE INTO label_formats (id, name, type, widthMm, heightMm, sheetCols, sheetRows, marginTopMm, marginLeftMm, gapXMm, gapYMm, sortOrder, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT OR IGNORE INTO label_formats (id, name, type, brand, code, widthMm, heightMm, sheetCols, sheetRows, marginTopMm, marginLeftMm, gapXMm, gapYMm, pageWidthMm, pageHeightMm, sortOrder, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     );
     for (const f of [
-      { id: "thermal_30x20",  name: "Thermal 30 x 20mm",             type: "thermal",  w: 30,   h: 20,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 0 },
-      { id: "thermal_40x30",  name: "Thermal 40 x 30mm",             type: "thermal",  w: 40,   h: 30,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 1 },
-      { id: "thermal_50x30",  name: "Thermal 50 x 30mm",             type: "thermal",  w: 50,   h: 30,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 2 },
-      { id: "thermal_58x40",  name: "Thermal 58 x 40mm",             type: "thermal",  w: 58,   h: 40,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 3 },
-      { id: "thermal_100x50", name: "Thermal 100 x 50mm",            type: "thermal",  w: 100,  h: 50,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 4 },
-      { id: "thermal_100x150",name: "Thermal 100 x 150mm (shipping)",type: "thermal",  w: 100,  h: 150,  cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 5 },
-      { id: "a4_6",           name: "A4 sheet - 6/sheet (L7166)",    type: "a4_sheet", w: 99.1, h: 93.1, cols: 2,    rows: 3,    mt: 8.85,  ml: 4.4,  gx: 3,    gy: 0,    sort: 10 },
-      { id: "a4_8",           name: "A4 sheet - 8/sheet (L7165)",    type: "a4_sheet", w: 99.1, h: 67.7, cols: 2,    rows: 4,    mt: 13.1,  ml: 4.65, gx: 2.5,  gy: 0,    sort: 11 },
-      { id: "a4_10",          name: "A4 sheet - 10/sheet (L7173)",   type: "a4_sheet", w: 99.1, h: 57.3, cols: 2,    rows: 5,    mt: 5.25,  ml: 4.9,  gx: 2,    gy: 0,    sort: 12 },
-      { id: "a4_14",          name: "A4 sheet - 14/sheet (L7163)",   type: "a4_sheet", w: 99.1, h: 38.1, cols: 2,    rows: 7,    mt: 15.15, ml: 4.9,  gx: 2,    gy: 0,    sort: 13 },
-      { id: "a4_16",          name: "A4 sheet - 16/sheet (L7162)",   type: "a4_sheet", w: 99.1, h: 33.9, cols: 2,    rows: 8,    mt: 12.9,  ml: 4.9,  gx: 2,    gy: 0,    sort: 14 },
-      { id: "a4_18",          name: "A4 sheet - 18/sheet (L7161)",   type: "a4_sheet", w: 63.5, h: 46.6, cols: 3,    rows: 6,    mt: 8.7,   ml: 7.25, gx: 2.5,  gy: 0,    sort: 15 },
-      { id: "a4_21",          name: "A4 sheet - 21/sheet (L7160)",   type: "a4_sheet", w: 63.5, h: 38.1, cols: 3,    rows: 7,    mt: 15.15, ml: 7.2,  gx: 2.5,  gy: 0,    sort: 16 },
-      { id: "a4_24",          name: "A4 sheet - 24/sheet (L7159)",   type: "a4_sheet", w: 63.5, h: 33.9, cols: 3,    rows: 8,    mt: 13.5,  ml: 7.2,  gx: 2.5,  gy: 0,    sort: 17 },
-      { id: "a4_48",          name: "A4 sheet - 48/sheet (L7636)",   type: "a4_sheet", w: 45.7, h: 21.2, cols: 4,    rows: 12,   mt: 21.3,  ml: 9.85, gx: 2.5,  gy: 0,    sort: 18 },
-      { id: "a4_65",          name: "A4 sheet - 65/sheet (L7651)",   type: "a4_sheet", w: 38.1, h: 21.2, cols: 5,    rows: 13,   mt: 15.1,  ml: 4.8,  gx: 2.5,  gy: 0,    sort: 19 }
+      { id: "thermal_30x20",  name: "Thermal 30 x 20mm",             type: "thermal",  brand: null,    code: null,    w: 30,   h: 20,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, pw: null,  ph: null,  sort: 0 },
+      { id: "thermal_40x30",  name: "Thermal 40 x 30mm",             type: "thermal",  brand: null,    code: null,    w: 40,   h: 30,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, pw: null,  ph: null,  sort: 1 },
+      { id: "thermal_50x30",  name: "Thermal 50 x 30mm",             type: "thermal",  brand: null,    code: null,    w: 50,   h: 30,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, pw: null,  ph: null,  sort: 2 },
+      { id: "thermal_58x40",  name: "Thermal 58 x 40mm",             type: "thermal",  brand: null,    code: null,    w: 58,   h: 40,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, pw: null,  ph: null,  sort: 3 },
+      { id: "thermal_100x50", name: "Thermal 100 x 50mm",            type: "thermal",  brand: null,    code: null,    w: 100,  h: 50,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, pw: null,  ph: null,  sort: 4 },
+      { id: "thermal_100x150",name: "Thermal 100 x 150mm (shipping)",type: "thermal",  brand: null,    code: null,    w: 100,  h: 150,  cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, pw: null,  ph: null,  sort: 5 },
+
+      { id: "a4_6",  name: "A4 sheet - 6/sheet (L7166)",  type: "a4_sheet", brand: "Avery", code: "L7166", w: 99.1, h: 93.1, cols: 2, rows: 3,  mt: 8.85,  ml: 4.4,  gx: 3,   gy: 0, pw: null, ph: null, sort: 10 },
+      { id: "a4_8",  name: "A4 sheet - 8/sheet (L7165)",  type: "a4_sheet", brand: "Avery", code: "L7165", w: 99.1, h: 67.7, cols: 2, rows: 4,  mt: 13.1,  ml: 4.65, gx: 2.5, gy: 0, pw: null, ph: null, sort: 11 },
+      { id: "a4_10", name: "A4 sheet - 10/sheet (L7173)", type: "a4_sheet", brand: "Avery", code: "L7173", w: 99.1, h: 57.3, cols: 2, rows: 5,  mt: 5.25,  ml: 4.9,  gx: 2,   gy: 0, pw: null, ph: null, sort: 12 },
+      { id: "a4_14", name: "A4 sheet - 14/sheet (L7163)", type: "a4_sheet", brand: "Avery", code: "L7163", w: 99.1, h: 38.1, cols: 2, rows: 7,  mt: 15.15, ml: 4.9,  gx: 2,   gy: 0, pw: null, ph: null, sort: 13 },
+      { id: "a4_16", name: "A4 sheet - 16/sheet (L7162)", type: "a4_sheet", brand: "Avery", code: "L7162", w: 99.1, h: 33.9, cols: 2, rows: 8,  mt: 12.9,  ml: 4.9,  gx: 2,   gy: 0, pw: null, ph: null, sort: 14 },
+      { id: "a4_18", name: "A4 sheet - 18/sheet (L7161)", type: "a4_sheet", brand: "Avery", code: "L7161", w: 63.5, h: 46.6, cols: 3, rows: 6,  mt: 8.7,   ml: 7.25, gx: 2.5, gy: 0, pw: null, ph: null, sort: 15 },
+      { id: "a4_21", name: "A4 sheet - 21/sheet (L7160)", type: "a4_sheet", brand: "Avery", code: "L7160", w: 63.5, h: 38.1, cols: 3, rows: 7,  mt: 15.15, ml: 7.2,  gx: 2.5, gy: 0, pw: null, ph: null, sort: 16 },
+      { id: "a4_24", name: "A4 sheet - 24/sheet (L7159)", type: "a4_sheet", brand: "Avery", code: "L7159", w: 63.5, h: 33.9, cols: 3, rows: 8,  mt: 13.5,  ml: 7.2,  gx: 2.5, gy: 0, pw: null, ph: null, sort: 17 },
+      { id: "a4_48", name: "A4 sheet - 48/sheet (L7636)", type: "a4_sheet", brand: "Avery", code: "L7636", w: 45.7, h: 21.2, cols: 4, rows: 12, mt: 21.3,  ml: 9.85, gx: 2.5, gy: 0, pw: null, ph: null, sort: 18 },
+      { id: "a4_65", name: "A4 sheet - 65/sheet (L7651)", type: "a4_sheet", brand: "Avery", code: "L7651", w: 38.1, h: 21.2, cols: 5, rows: 13, mt: 15.1,  ml: 4.8,  gx: 2.5, gy: 0, pw: null, ph: null, sort: 19 },
+
+      // ── Tower (South Africa) ──────────────────────────────────────────
+      { id: "tw_w107", name: "Tower W107 - 65/sheet",  type: "a4_sheet", brand: "Tower", code: "W107", w: 38.1, h: 21.2, cols: 5, rows: 13, mt: 15.1,  ml: 4.8,  gx: 2.5, gy: 0, pw: null, ph: null, sort: 30 }, // = a4_65/L7651
+      { id: "tw_w115", name: "Tower W115 - 45/sheet",  type: "a4_sheet", brand: "Tower", code: "W115", w: 38.5, h: 29.9, cols: 5, rows: 9,  mt: 13.95, ml: 8.75, gx: 0,   gy: 0, pw: null, ph: null, sort: 31 }, // TODO: unverified, calibrate
+      { id: "tw_w239", name: "Tower W239 - 39/sheet",  type: "a4_sheet", brand: "Tower", code: "W239", w: 66,   h: 20.69,cols: 3, rows: 13, mt: 14.02, ml: 6,    gx: 0,   gy: 0, pw: null, ph: null, sort: 32 }, // TODO: unverified, calibrate
+      { id: "tw_w100", name: "Tower W100 - 24/sheet",  type: "a4_sheet", brand: "Tower", code: "W100", w: 70,   h: 37,   cols: 3, rows: 8,  mt: 0.5,   ml: 0,    gx: 0,   gy: 0, pw: null, ph: null, sort: 33 }, // TODO: unverified, calibrate (near-zero side margin is suspicious — likely needs a small gap in reality)
+      { id: "tw_w109", name: "Tower W109 - 24/sheet",  type: "a4_sheet", brand: "Tower", code: "W109", w: 64,   h: 33.9, cols: 3, rows: 8,  mt: 12.9,  ml: 9,    gx: 0,   gy: 0, pw: null, ph: null, sort: 34 }, // TODO: unverified, calibrate
+      { id: "tw_w110", name: "Tower W110 - 24/sheet",  type: "a4_sheet", brand: "Tower", code: "W110", w: 35,   h: 70,   cols: 6, rows: 4,  mt: 8.5,   ml: 0,    gx: 0,   gy: 0, pw: null, ph: null, sort: 35 }, // TODO: unverified, calibrate
+      { id: "tw_w108", name: "Tower W108 - 21/sheet",  type: "a4_sheet", brand: "Tower", code: "W108", w: 63.5, h: 38.1, cols: 3, rows: 7,  mt: 15.15, ml: 7.2,  gx: 2.5, gy: 0, pw: null, ph: null, sort: 36 }, // = a4_21/L7160
+      { id: "tw_w112", name: "Tower W112 - 18/sheet",  type: "a4_sheet", brand: "Tower", code: "W112", w: 63.5, h: 46.6, cols: 3, rows: 6,  mt: 8.7,   ml: 7.25, gx: 2.5, gy: 0, pw: null, ph: null, sort: 37 }, // = a4_18/L7161
+      { id: "tw_w101", name: "Tower W101 - 16/sheet",  type: "a4_sheet", brand: "Tower", code: "W101", w: 105,  h: 37,   cols: 2, rows: 8,  mt: 0.5,   ml: 0,    gx: 0,   gy: 0, pw: null, ph: null, sort: 38 }, // TODO: unverified, calibrate (near-zero side margin is suspicious)
+      // W111 is 35x105mm labels, 16/sheet — that grid (8 cols x 2 rows)
+      // only fits an A4 sheet used in LANDSCAPE (297mm wide); it cannot
+      // fit any valid cols x rows grid on a portrait A4 page, so this is
+      // the one Tower preset that needs pageWidthMm/pageHeightMm swapped.
+      { id: "tw_w111", name: "Tower W111 - 16/sheet (landscape)", type: "a4_sheet", brand: "Tower", code: "W111", w: 35, h: 105, cols: 8, rows: 2, mt: 0, ml: 8.5, gx: 0, gy: 0, pw: 297, ph: 210, sort: 39 }, // TODO: unverified, calibrate
+      { id: "tw_w237", name: "Tower W237 - 14/sheet",  type: "a4_sheet", brand: "Tower", code: "W237", w: 99,   h: 38.1, cols: 2, rows: 7,  mt: 15.15, ml: 4.9,  gx: 2,   gy: 0, pw: null, ph: null, sort: 40 }, // = a4_14/L7163
+      { id: "tw_w102", name: "Tower W102 - 12/sheet",  type: "a4_sheet", brand: "Tower", code: "W102", w: 101,  h: 45,   cols: 2, rows: 6,  mt: 13.5,  ml: 4,    gx: 0,   gy: 0, pw: null, ph: null, sort: 41 }, // TODO: unverified, calibrate
+      { id: "tw_w233", name: "Tower W233 - 12/sheet",  type: "a4_sheet", brand: "Tower", code: "W233", w: 63.5, h: 72,   cols: 3, rows: 4,  mt: 4.5,   ml: 9.75, gx: 0,   gy: 0, pw: null, ph: null, sort: 42 }, // TODO: unverified, calibrate
+      { id: "tw_w236", name: "Tower W236 - 12/sheet",  type: "a4_sheet", brand: "Tower", code: "W236", w: 105,  h: 49,   cols: 2, rows: 6,  mt: 1.5,   ml: 0,    gx: 0,   gy: 0, pw: null, ph: null, sort: 43 }, // TODO: unverified, calibrate
+      { id: "tw_w119", name: "Tower W119 - 10/sheet",  type: "a4_sheet", brand: "Tower", code: "W119", w: 99,   h: 57,   cols: 2, rows: 5,  mt: 5.25,  ml: 4.9,  gx: 2,   gy: 0, pw: null, ph: null, sort: 44 }, // = a4_10/L7173
+      { id: "tw_w103", name: "Tower W103 - 8/sheet",   type: "a4_sheet", brand: "Tower", code: "W103", w: 101,  h: 70,   cols: 2, rows: 4,  mt: 8.5,   ml: 4,    gx: 0,   gy: 0, pw: null, ph: null, sort: 45 }, // TODO: unverified, calibrate
+      { id: "tw_w234", name: "Tower W234 - 8/sheet",   type: "a4_sheet", brand: "Tower", code: "W234", w: 105,  h: 74,   cols: 2, rows: 4,  mt: 0.5,   ml: 0,    gx: 0,   gy: 0, pw: null, ph: null, sort: 46 }, // TODO: unverified, calibrate
+      { id: "tw_w120", name: "Tower W120 - 6/sheet",   type: "a4_sheet", brand: "Tower", code: "W120", w: 99,   h: 93.1, cols: 2, rows: 3,  mt: 8.85,  ml: 4.4,  gx: 3,   gy: 0, pw: null, ph: null, sort: 47 }, // = a4_6/L7166
+      { id: "tw_w104", name: "Tower W104 - 4/sheet",   type: "a4_sheet", brand: "Tower", code: "W104", w: 98,   h: 139,  cols: 2, rows: 2,  mt: 9.5,   ml: 7,    gx: 0,   gy: 0, pw: null, ph: null, sort: 48 }, // TODO: unverified, calibrate
+      { id: "tw_w114", name: "Tower W114 - 4/sheet",   type: "a4_sheet", brand: "Tower", code: "W114", w: 105,  h: 149,  cols: 2, rows: 2,  mt: 0,     ml: 0,    gx: 0,   gy: 0, pw: null, ph: null, sort: 49 }, // TODO: unverified, calibrate — published height (149x2=298mm) is 1mm over nominal A4 (297mm), normal rounding for this kind of sheet
+      { id: "tw_w105", name: "Tower W105 - 2/sheet",   type: "a4_sheet", brand: "Tower", code: "W105", w: 199.5,h: 145.5,cols: 1, rows: 2,  mt: 3,     ml: 5.25, gx: 0,   gy: 0, pw: null, ph: null, sort: 50 }, // TODO: unverified, calibrate
+      { id: "tw_w106", name: "Tower W106 - 1/sheet (full page)", type: "a4_sheet", brand: "Tower", code: "W106", w: 210, h: 297, cols: 1, rows: 1, mt: 0, ml: 0, gx: 0, gy: 0, pw: null, ph: null, sort: 51 },
+
+      // ── Avery (international / US Letter — NOT A4, see comment above) ──
+      { id: "av_5160", name: "Avery 5160/8160 - 30/sheet (US Letter)", type: "a4_sheet", brand: "Avery", code: "5160/8160", w: 66.7,  h: 25.4, cols: 3, rows: 10, mt: 12.7, ml: 4.8,  gx: 3.2, gy: 0, pw: 215.9, ph: 279.4, sort: 60 },
+      { id: "av_5163", name: "Avery 5163/8163 - 10/sheet (US Letter)", type: "a4_sheet", brand: "Avery", code: "5163/8163", w: 101.6, h: 50.8, cols: 2, rows: 5,  mt: 12.7, ml: 6.35, gx: 0,   gy: 0, pw: 215.9, ph: 279.4, sort: 61 },
+      { id: "av_5164", name: "Avery 5164 - 6/sheet (US Letter)",       type: "a4_sheet", brand: "Avery", code: "5164",      w: 101.6, h: 84.7, cols: 2, rows: 3,  mt: 12.65,ml: 6.35, gx: 0,   gy: 0, pw: 215.9, ph: 279.4, sort: 62 },
+      { id: "av_5167", name: "Avery 5167 - 80/sheet (US Letter)",      type: "a4_sheet", brand: "Avery", code: "5167",      w: 44.5,  h: 12.7, cols: 4, rows: 20, mt: 12.7, ml: 18.95,gx: 0,   gy: 0, pw: 215.9, ph: 279.4, sort: 63 } // TODO: side margin is a rough estimate, not cross-checked — verify against Avery's own template before a bulk run
     ]) {
-      seedLabelFormat.run(f.id, f.name, f.type, f.w, f.h, f.cols, f.rows, f.mt, f.ml, f.gx, f.gy, f.sort, nowIso);
+      seedLabelFormat.run(f.id, f.name, f.type, f.brand, f.code, f.w, f.h, f.cols, f.rows, f.mt, f.ml, f.gx, f.gy, f.pw, f.ph, f.sort, nowIso);
     }
   }
 
@@ -2466,7 +2555,7 @@ export class KotDatabase {
   // See the label_formats schema comment (migrate()) for what these are.
   listLabelFormats(): LabelFormat[] {
     return this.db
-      .prepare("SELECT id, name, type, widthMm, heightMm, sheetCols, sheetRows, marginTopMm, marginLeftMm, gapXMm, gapYMm FROM label_formats ORDER BY sortOrder ASC")
+      .prepare("SELECT id, name, type, brand, code, widthMm, heightMm, sheetCols, sheetRows, marginTopMm, marginLeftMm, gapXMm, gapYMm, pageWidthMm, pageHeightMm FROM label_formats ORDER BY sortOrder ASC")
       .all() as LabelFormat[];
   }
 
