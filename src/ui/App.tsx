@@ -190,7 +190,13 @@ let closeActivePrintPreview: (() => void) | null = null;
 
 // Top-level component: resolves the boot/login/logged-in state before
 // deciding what to render, and applies branding for both the login screen
-// and the logged-in app.
+// and the logged-in app. The /dev/scan-test diagnostic escape hatch (see
+// ScanTestPage) is gated in main.tsx, BEFORE this component ever mounts
+// — not as a conditional branch in here, which would call hooks
+// conditionally (React's rules of hooks forbid this, and rightly so:
+// mixing an unauthenticated diagnostic tool into the same component that
+// owns all the real app's state is exactly the kind of entanglement this
+// whole diagnostic-page approach exists to avoid).
 export function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [booting, setBooting] = useState(true);
