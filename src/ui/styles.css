@@ -823,12 +823,48 @@ th {
 }
 
 /* Full-sheet view: real A4 proportions, scaled down to fit the panel
-   width rather than zoomed — the point here is checking grid alignment
-   and start-position skipping, not reading individual label text. */
+   width via a CSS transform on the iframe (see ScaledA4Frame) rather than
+   just constraining the outer box — the iframe's content is rendered at
+   true physical A4 size and then shrunk, so it actually fits instead of
+   being clipped. overflow:hidden crops the now-oversized iframe box back
+   down to the scaled visual size. */
 .label-preview-frame-a4 {
   width: 100%;
-  max-width: 420px;
   aspect-ratio: 210 / 297;
+  overflow: hidden;
+}
+
+.label-preview-frame-a4 iframe {
+  transform-origin: top left;
+}
+
+/* Grid of clickable cells mirroring the physical sheet's cols x rows —
+   click a cell to mark it as already peeled off a partially-used sheet. */
+.sheet-position-picker {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.sheet-pos {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-alt, #fff);
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.sheet-pos.blocked {
+  background: var(--danger-bg, #fdecea);
+  border-color: var(--danger, #c0392b);
+  color: var(--danger, #c0392b);
+  text-decoration: line-through;
 }
 
 /* ── Empty state ── */

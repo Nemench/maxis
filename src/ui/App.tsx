@@ -2031,7 +2031,7 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
   const [quantity, setQuantity] = useState(1);
   const [formats, setFormats] = useState<LabelFormat[]>([]);
   const [formatId, setFormatId] = useState("");
-  const [startPosition, setStartPosition] = useState(1);
+  const [blockedPositions, setBlockedPositions] = useState<Set<number>>(new Set());
   const [printing, setPrinting] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -2071,11 +2071,17 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
 
   const changeFormat = (id: string) => {
     setFormatId(id);
-    setStartPosition(1);
+    setBlockedPositions(new Set());
     localStorage.setItem(LAST_LABEL_FORMAT_KEY, id);
   };
 
-  const perSheet = format?.type === "a4_sheet" && format.sheetCols && format.sheetRows ? format.sheetCols * format.sheetRows : 0;
+  const toggleBlockedPosition = (pos: number) => {
+    setBlockedPositions((cur) => {
+      const next = new Set(cur);
+      if (next.has(pos)) next.delete(pos); else next.add(pos);
+      return next;
+    });
+  };
 
   const print = () => {
     if (!data || !format) return;
@@ -2086,7 +2092,7 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
     try {
       const html = format.type === "thermal"
         ? buildThermalPrintHtml(data, format, quantity)
-        : buildA4SheetHtml(data, format, quantity, startPosition);
+        : buildA4SheetHtml(data, format, quantity, blockedPositions);
       printHtml(applyColorMode(html));
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Could not build the label print job.");
@@ -2139,12 +2145,6 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
               </select>
             </label>
 
-            {format?.type === "a4_sheet" && perSheet > 0 && (
-              <label>Start position on sheet <span className="optional-hint">(1 = top-left; use this to reuse a partially-used sheet)</span>
-                <input type="number" min="1" max={perSheet} value={startPosition} onChange={(e) => setStartPosition(Math.min(perSheet, Math.max(1, Number(e.target.value) || 1)))} />
-              </label>
-            )}
-
             {message && <p className="form-error">{message}</p>}
 
             <footer className="actions">
@@ -2157,7 +2157,7 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
       </div>
 
       {selected && data && format && (
-        <LabelPreview data={data} format={format} quantity={quantity} startPosition={startPosition} />
+        <LabelPreview data={data} format={format} quantity={quantity} blockedPositions={blockedPositions} onToggleBlocked={toggleBlockedPosition} />
       )}
     </div>
   );
@@ -5735,19 +5735,21 @@ ${LABEL_CELL_STYLE}
 }
 
 // A4 sheet: labels fill a fixed rows x cols grid per page, in reading
-// order (left-to-right, top-to-bottom). `startPosition` (1-based) skips
-// that many leading cells on the FIRST sheet only, so a partially-used
-// sheet can be reused rather than wasting its already-blank labels.
-// Renders every sheet needed to fit `quantity` labels starting from that
-// position, one sheet per printed page.
-function buildA4SheetHtml(data: LabelData, format: LabelFormat, quantity: number, startPosition: number): string {
+// order (left-to-right, top-to-bottom). `blockedPositions` (1-based cell
+// numbers, reading order) marks cells already peeled off a physical sheet
+// — those are skipped on the FIRST sheet only, so a partially-used sheet
+// can be reused for exactly its remaining gaps rather than wasting them
+// or requiring the gaps to be a contiguous run from the top-left. Every
+// sheet after the first is a fresh, fully-available one. Renders every
+// sheet needed to fit `quantity` labels, one sheet per printed page.
+function buildA4SheetHtml(data: LabelData, format: LabelFormat, quantity: number, blockedPositions: ReadonlySet<number>): string {
   if (format.type !== "a4_sheet" || !format.sheetCols || !format.sheetRows) {
     throw new Error("buildA4SheetHtml requires an a4_sheet format with sheetCols/sheetRows set");
   }
   const perSheet = format.sheetCols * format.sheetRows;
-  const skip = Math.min(Math.max(0, Math.round(startPosition) - 1), perSheet - 1);
-  const n = Math.min(Math.max(1, Math.round(quantity) || 1), 5000);
-  const sheets = Math.ceil((skip + n) / perSheet);
+  const n = Math.min(Math.max(0, Math.round(quantity) || 0), 5000);
+  const available1 = Math.max(0, perSheet - blockedPositions.size);
+  const sheets = Math.max(1, available1 >= n ? 1 : 1 + Math.ceil((n - available1) / perSheet));
   const cell = buildLabelCellHtml(data, format.widthMm, format.heightMm);
   const gapX = format.gapXMm ?? 0;
   const gapY = format.gapYMm ?? 0;
@@ -5756,9 +5758,9 @@ function buildA4SheetHtml(data: LabelData, format: LabelFormat, quantity: number
   const pages: string[] = [];
   for (let s = 0; s < sheets; s++) {
     const cells: string[] = [];
-    for (let pos = 0; pos < perSheet; pos++) {
-      const isSkipped = s === 0 && pos < skip;
-      const isFilled = !isSkipped && placed < n;
+    for (let pos = 1; pos <= perSheet; pos++) {
+      const isBlocked = s === 0 && blockedPositions.has(pos);
+      const isFilled = !isBlocked && placed < n;
       cells.push(isFilled ? cell : `<div class="label-empty"></div>`);
       if (isFilled) placed++;
     }
@@ -5774,26 +5776,85 @@ ${LABEL_CELL_STYLE}
 </style></head><body>${pages.join("")}</body></html>`;
 }
 
+// CSS reference pixels for an A4 page (1mm = 96/25.4px, same fixed ratio
+// the browser itself uses to lay out the "mm" units in the printed HTML,
+// so this is exact regardless of the viewer's actual screen DPI).
+const A4_PX_W = (210 * 96) / 25.4;
+const A4_PX_H = (297 * 96) / 25.4;
+
+// The sheet preview used to size its iframe by CSS alone (max-width:420px
+// on the wrapper) while the iframe's *content* was the real, physically-
+// sized A4 HTML — a browser doesn't shrink an iframe's content to fit a
+// small frame, so in practice most of the sheet was just clipped off
+// rather than "previewed". Fixing that means actually rendering the
+// iframe at true A4 size and scaling the whole thing down with a CSS
+// transform, recomputed on resize so it always exactly fills whatever
+// width the panel gives it.
+function ScaledA4Frame({ srcDoc }: { srcDoc: string }) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const update = () => setScale(el.clientWidth > 0 ? el.clientWidth / A4_PX_W : 1);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  return (
+    <div ref={wrapRef} className="label-preview-frame label-preview-frame-a4">
+      <iframe title="Sheet preview" srcDoc={srcDoc} style={{ width: `${A4_PX_W}px`, height: `${A4_PX_H}px`, transform: `scale(${scale})` }} />
+    </div>
+  );
+}
+
+// Click-to-toggle grid mirroring the sheet's real cols x rows — lets an
+// admin mark exactly which cells are already peeled off a partially-used
+// physical sheet (in any pattern, not just a leading run) so a print job
+// lands only in the gaps that are actually still blank.
+function SheetPositionPicker({ cols, rows, blocked, onToggle }: { cols: number; rows: number; blocked: Set<number>; onToggle: (pos: number) => void }) {
+  const perSheet = cols * rows;
+  return (
+    <div className="sheet-position-picker" style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
+      {Array.from({ length: perSheet }, (_, i) => i + 1).map((pos) => (
+        <button
+          type="button"
+          key={pos}
+          className={`sheet-pos${blocked.has(pos) ? " blocked" : ""}`}
+          onClick={() => onToggle(pos)}
+          title={blocked.has(pos) ? "Already used — click to mark as available" : "Available — click to mark as already used"}
+        >
+          {pos}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // Reuses the exact same HTML the print button will send — an iframe
 // showing real generated markup, not a parallel React re-implementation
 // that could drift from what actually prints. Two views: a zoomed single
 // label (always), and for a4_sheet formats, the first sheet's full grid
-// (enough to verify alignment/start-position skipping without rendering
+// (enough to verify alignment/blocked-position skipping without rendering
 // every page of a large run into hidden iframes).
-function LabelPreview({ data, format, quantity, startPosition }: { data: LabelData; format: LabelFormat; quantity: number; startPosition: number }) {
+function LabelPreview({ data, format, quantity, blockedPositions, onToggleBlocked }: { data: LabelData; format: LabelFormat; quantity: number; blockedPositions: Set<number>; onToggleBlocked: (pos: number) => void }) {
   const singleHtml = useMemo(() => buildThermalPrintHtml(data, format, 1), [data, format]);
 
   const perSheet = format.type === "a4_sheet" && format.sheetCols && format.sheetRows ? format.sheetCols * format.sheetRows : 1;
-  const sheetsNeeded = format.type === "a4_sheet" ? Math.ceil((Math.max(0, startPosition - 1) + Math.max(1, quantity)) / perSheet) : Math.max(1, quantity);
+  const available1 = Math.max(0, perSheet - blockedPositions.size);
+  const sheetsNeeded = format.type === "a4_sheet" ? Math.max(1, available1 >= quantity ? 1 : 1 + Math.ceil((Math.max(1, quantity) - available1) / perSheet)) : Math.max(1, quantity);
 
   const sheetHtml = useMemo(() => {
     if (format.type !== "a4_sheet") return "";
     // Only render enough labels to fill page 1 — the preview only ever
     // shows that page, so there's no reason to build (and hide) HTML for
     // sheets 2..N of a large run.
-    const page1Quantity = Math.min(Math.max(1, quantity), perSheet);
-    return buildA4SheetHtml(data, format, page1Quantity, startPosition);
-  }, [data, format, quantity, startPosition, perSheet]);
+    const page1Quantity = Math.min(Math.max(0, quantity), available1);
+    return buildA4SheetHtml(data, format, page1Quantity, blockedPositions);
+  }, [data, format, quantity, blockedPositions, available1]);
 
   return (
     <div className="panel label-preview">
@@ -5803,12 +5864,15 @@ function LabelPreview({ data, format, quantity, startPosition }: { data: LabelDa
           <iframe title="Label preview" srcDoc={singleHtml} />
         </div>
       </div>
-      {format.type === "a4_sheet" && (
+      {format.type === "a4_sheet" && format.sheetCols && format.sheetRows && (
         <div className="label-preview-sheet">
           <h3>Sheet layout (page 1 of {sheetsNeeded})</h3>
-          <div className="label-preview-frame label-preview-frame-a4">
-            <iframe title="Sheet preview" srcDoc={sheetHtml} />
-          </div>
+          <ScaledA4Frame srcDoc={sheetHtml} />
+          <p className="settings-hint">
+            Click a cell below to mark it as already used on a partially-used sheet — the print job will skip it and fill the remaining gaps instead.
+            {blockedPositions.size > 0 && ` (${blockedPositions.size} marked used)`}
+          </p>
+          <SheetPositionPicker cols={format.sheetCols} rows={format.sheetRows} blocked={blockedPositions} onToggle={onToggleBlocked} />
         </div>
       )}
       <p className="settings-hint">

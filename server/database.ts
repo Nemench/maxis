@@ -1975,22 +1975,42 @@ export class KotDatabase {
     // Seed default label formats — INSERT OR IGNORE against the primary
     // key, same idempotent-on-every-boot pattern as order_message_templates
     // just above, so this backfills existing installs without clobbering
-    // an admin's own edits. The three "a4_XX" presets are standard,
-    // widely-published Avery A4 label dimensions (L7160/L7159/L7651-
-    // equivalent) — not verifiable against real physical output in this
-    // environment, so print one test sheet against actual stock before a
-    // bulk run and nudge marginTopMm/marginLeftMm if it's off by a mm or
-    // two, same caveat that applies to any label-template software.
+    // an admin's own edits (or an admin's own custom formats — this only
+    // ever inserts these specific ids, never touches anyone else's rows).
+    //
+    // The "a4_XX" presets are all standard Avery A4 sheet layouts, each
+    // sold under the same physical dimensions by other brands too (Tower,
+    // Ryman, Rapesco, Q-Connet, HERMA, etc. all publish label sheets that
+    // are pin-compatible with these Avery codes — "Avery-compatible" is
+    // the industry-standard way these are described, not an Avery-specific
+    // format). a4_8/10/14/16/18/48 below were cross-checked against
+    // multiple independent published spec sheets for their Avery code
+    // (L7165/L7173/L7163/L7162/L7161/L7636) and the margins/gaps satisfy
+    // cols*width + gaps ≈ 210mm and rows*height ≈ 297mm exactly, so these
+    // should print true out of the box. a4_21/24/65 predate this and
+    // haven't been re-verified the same way — if a sheet comes out
+    // shifted, nudge its marginTopMm/marginLeftMm by a mm or two, same
+    // caveat that applies to any label-template software.
     const seedLabelFormat = this.db.prepare(
       "INSERT OR IGNORE INTO label_formats (id, name, type, widthMm, heightMm, sheetCols, sheetRows, marginTopMm, marginLeftMm, gapXMm, gapYMm, sortOrder, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     );
     for (const f of [
-      { id: "thermal_40x30", name: "Thermal 40 x 30mm",   type: "thermal",  w: 40,   h: 30,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 0 },
-      { id: "thermal_50x30", name: "Thermal 50 x 30mm",   type: "thermal",  w: 50,   h: 30,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 1 },
-      { id: "thermal_58x40", name: "Thermal 58 x 40mm",   type: "thermal",  w: 58,   h: 40,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 2 },
-      { id: "a4_21",         name: "A4 sheet - 21/sheet", type: "a4_sheet", w: 63.5, h: 38.1, cols: 3,    rows: 7,    mt: 15.15, ml: 7.2,  gx: 2.5,  gy: 0,    sort: 3 },
-      { id: "a4_24",         name: "A4 sheet - 24/sheet", type: "a4_sheet", w: 63.5, h: 33.9, cols: 3,    rows: 8,    mt: 13.5,  ml: 7.2,  gx: 2.5,  gy: 0,    sort: 4 },
-      { id: "a4_65",         name: "A4 sheet - 65/sheet", type: "a4_sheet", w: 38.1, h: 21.2, cols: 5,    rows: 13,   mt: 15.1,  ml: 4.8,  gx: 2.5,  gy: 0,    sort: 5 }
+      { id: "thermal_30x20",  name: "Thermal 30 x 20mm",             type: "thermal",  w: 30,   h: 20,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 0 },
+      { id: "thermal_40x30",  name: "Thermal 40 x 30mm",             type: "thermal",  w: 40,   h: 30,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 1 },
+      { id: "thermal_50x30",  name: "Thermal 50 x 30mm",             type: "thermal",  w: 50,   h: 30,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 2 },
+      { id: "thermal_58x40",  name: "Thermal 58 x 40mm",             type: "thermal",  w: 58,   h: 40,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 3 },
+      { id: "thermal_100x50", name: "Thermal 100 x 50mm",            type: "thermal",  w: 100,  h: 50,   cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 4 },
+      { id: "thermal_100x150",name: "Thermal 100 x 150mm (shipping)",type: "thermal",  w: 100,  h: 150,  cols: null, rows: null, mt: null,  ml: null, gx: null, gy: null, sort: 5 },
+      { id: "a4_6",           name: "A4 sheet - 6/sheet (L7166)",    type: "a4_sheet", w: 99.1, h: 93.1, cols: 2,    rows: 3,    mt: 8.85,  ml: 4.4,  gx: 3,    gy: 0,    sort: 10 },
+      { id: "a4_8",           name: "A4 sheet - 8/sheet (L7165)",    type: "a4_sheet", w: 99.1, h: 67.7, cols: 2,    rows: 4,    mt: 13.1,  ml: 4.65, gx: 2.5,  gy: 0,    sort: 11 },
+      { id: "a4_10",          name: "A4 sheet - 10/sheet (L7173)",   type: "a4_sheet", w: 99.1, h: 57.3, cols: 2,    rows: 5,    mt: 5.25,  ml: 4.9,  gx: 2,    gy: 0,    sort: 12 },
+      { id: "a4_14",          name: "A4 sheet - 14/sheet (L7163)",   type: "a4_sheet", w: 99.1, h: 38.1, cols: 2,    rows: 7,    mt: 15.15, ml: 4.9,  gx: 2,    gy: 0,    sort: 13 },
+      { id: "a4_16",          name: "A4 sheet - 16/sheet (L7162)",   type: "a4_sheet", w: 99.1, h: 33.9, cols: 2,    rows: 8,    mt: 12.9,  ml: 4.9,  gx: 2,    gy: 0,    sort: 14 },
+      { id: "a4_18",          name: "A4 sheet - 18/sheet (L7161)",   type: "a4_sheet", w: 63.5, h: 46.6, cols: 3,    rows: 6,    mt: 8.7,   ml: 7.25, gx: 2.5,  gy: 0,    sort: 15 },
+      { id: "a4_21",          name: "A4 sheet - 21/sheet (L7160)",   type: "a4_sheet", w: 63.5, h: 38.1, cols: 3,    rows: 7,    mt: 15.15, ml: 7.2,  gx: 2.5,  gy: 0,    sort: 16 },
+      { id: "a4_24",          name: "A4 sheet - 24/sheet (L7159)",   type: "a4_sheet", w: 63.5, h: 33.9, cols: 3,    rows: 8,    mt: 13.5,  ml: 7.2,  gx: 2.5,  gy: 0,    sort: 17 },
+      { id: "a4_48",          name: "A4 sheet - 48/sheet (L7636)",   type: "a4_sheet", w: 45.7, h: 21.2, cols: 4,    rows: 12,   mt: 21.3,  ml: 9.85, gx: 2.5,  gy: 0,    sort: 18 },
+      { id: "a4_65",          name: "A4 sheet - 65/sheet (L7651)",   type: "a4_sheet", w: 38.1, h: 21.2, cols: 5,    rows: 13,   mt: 15.1,  ml: 4.8,  gx: 2.5,  gy: 0,    sort: 19 }
     ]) {
       seedLabelFormat.run(f.id, f.name, f.type, f.w, f.h, f.cols, f.rows, f.mt, f.ml, f.gx, f.gy, f.sort, nowIso);
     }
