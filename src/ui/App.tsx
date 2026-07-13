@@ -31,6 +31,7 @@ import {
   Package,
   Plus,
   Printer,
+  RefreshCw,
   Save,
   ScanLine,
   Scissors,
@@ -2341,6 +2342,12 @@ function PrintLabelsPanel({ products }: { products: Product[] }) {
 function StockPanel({ products, currentUser, onChanged }: { products: Product[]; currentUser: User; onChanged: () => Promise<void> }) {
   const canEditCatalog = currentUser.role === "admin";
   const [view, setView] = useState<"catalog" | "count" | "yields">(canEditCatalog ? "catalog" : "count");
+  const [refreshing, setRefreshing] = useState(false);
+
+  const refreshStock = async () => {
+    setRefreshing(true);
+    try { await onChanged(); } finally { setRefreshing(false); }
+  };
 
   return (
     <>
@@ -2348,6 +2355,9 @@ function StockPanel({ products, currentUser, onChanged }: { products: Product[];
         {canEditCatalog && <button type="button" className={view === "catalog" ? "active" : "secondary"} onClick={() => setView("catalog")}>Catalog</button>}
         <button type="button" className={view === "count" ? "active" : "secondary"} onClick={() => setView("count")}>Count</button>
         <button type="button" className={view === "yields" ? "active" : "secondary"} onClick={() => setView("yields")}>Cut Estimates</button>
+        <button type="button" className="secondary" onClick={() => void refreshStock()} disabled={refreshing} title="Reload stock from the server">
+          <RefreshCw size={16} className={refreshing ? "spin" : ""} /> {refreshing ? "Refreshing…" : "Refresh"}
+        </button>
       </div>
       {view === "catalog" && canEditCatalog && <Products products={products} onChanged={onChanged} />}
       {view === "count" && <StockTakePanel products={products} currentUser={currentUser} onChanged={onChanged} />}
