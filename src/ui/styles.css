@@ -2273,15 +2273,9 @@ button.sm {
 }
 
 /* ── POS (Point of Sale) ── */
-/* Three columns: product entry (left) | till slip (middle, the sale's
-   single source of truth) | entry controls + checkout (right). Middle
-   and right columns are both sized to a fixed height matching the panel
-   so the slip can scroll internally on a long sale (see
-   .pos-slip-column) without the keypad/payment column in the right
-   column ever getting pushed out of view — the two scroll independently. */
 .pos-panel {
   display: grid;
-  grid-template-columns: 1fr 340px 320px;
+  grid-template-columns: 1fr 360px;
   gap: 16px;
   align-items: start;
   height: 100%;
@@ -2486,33 +2480,7 @@ button.sm {
   letter-spacing: 0.3px;
 }
 
-/* Middle column: the till slip, and ONLY the till slip — no keypad,
-   payment, or customer fields live here (see .pos-controls-column for
-   those). Fixed height matching the panel with its own internal scroll,
-   so a long sale scrolls the slip in place rather than growing the
-   column (which would misalign it against the right column) or pushing
-   the checkout controls away. */
-.pos-slip-column {
-  position: sticky;
-  top: 0;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - 160px);
-  overflow: hidden;
-  font-family: "Courier New", ui-monospace, monospace;
-}
-
-/* Right column: entry controls (keypad) + checkout only — structurally
-   separate from the slip so it can never end up holding cart/receipt
-   content. Its own independent scroll (same fixed height as the slip
-   column) keeps the Pay/Clear Sale buttons reachable even if the buyer-
-   details/customer-contact fields above them (full-invoice threshold,
-   WhatsApp/email opt-in) push things tall on a small screen. */
-.pos-controls-column {
+.pos-receipt {
   position: sticky;
   top: 0;
   background: var(--panel);
@@ -2522,8 +2490,8 @@ button.sm {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  height: calc(100vh - 160px);
-  overflow-y: auto;
+  max-height: calc(100vh - 160px);
+  font-family: "Courier New", ui-monospace, monospace;
 }
 
 .pos-receipt-actions {
@@ -2863,10 +2831,8 @@ button.sm {
     grid-template-columns: 1fr;
   }
 
-  .pos-slip-column,
-  .pos-controls-column {
+  .pos-receipt {
     position: static;
-    height: auto;
-    max-height: 60vh;
+    max-height: none;
   }
 }

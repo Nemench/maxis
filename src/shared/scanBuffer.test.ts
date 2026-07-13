@@ -1,89 +1,66 @@
 import { describe, it, expect } from "vitest";
-import { initScanBuffer, feedScanKey, SCAN_MIN_LENGTH } from "./scanBuffer";
+import { initScanBuffer, feedScanBuffer, SCAN_MIN_LENGTH } from "./scanBuffer";
 
-describe("feedScanKey", () => {
-  it("never suppresses the first keystroke of a burst (there's nothing to compare timing against yet)", () => {
-    const state = initScanBuffer();
-    const result = feedScanKey(state, "6", 0);
-    expect(result.suppress).toBe(false);
-    expect(result.burstConfirmed).toBe(false);
+// Feeds a string as a sequence of keydown events `gapMs` apart, then a
+// final Enter, returning whatever feedScanBuffer returned for that Enter
+// (the "did this look like a completed scan" verdict).
+function typeString(str: string, gapMs: number): string | null {
+  const state = initScanBuffer();
+  let t = 0;
+  for (const ch of str) {
+    feedScanBuffer(state, ch, t);
+    t += gapMs;
+  }
+  return feedScanBuffer(state, "Enter", t);
+}
+
+describe("feedScanBuffer", () => {
+  it("recognizes a fast burst (real scanner timing) of a full EAN-13 as a completed scan", () => {
+    // Real USB/Bluetooth HID scanners type each character only a few ms
+    // apart — well under the 50ms threshold.
+    expect(typeString("6001234567890", 8)).toBe("6001234567890");
   });
 
-  it("confirms the burst on the SECOND fast keystroke, and only that one", () => {
-    const state = initScanBuffer();
-    feedScanKey(state, "6", 0);
-    const second = feedScanKey(state, "0", 8);
-    expect(second.suppress).toBe(true);
-    expect(second.burstConfirmed).toBe(true); // caller should now wipe the visible first char
-
-    const third = feedScanKey(state, "0", 16);
-    expect(third.suppress).toBe(true);
-    expect(third.burstConfirmed).toBe(false); // already confirmed — don't fire the "clear it" signal twice
+  it("does NOT treat slow, human-paced keystrokes of the same digits as a scan", () => {
+    // 200ms between keystrokes is well beyond human fast-typing speed,
+    // let alone scanner speed — each keystroke resets the buffer, so by
+    // the time Enter arrives only the last character remains, which is
+    // below SCAN_MIN_LENGTH.
+    const result = typeString("6001234567890", 200);
+    expect(result).toBeNull();
   });
 
-  it("suppresses every character of a fast burst and completes the scan on Enter", () => {
+  it("ignores non-character keys (Shift, Tab, arrows) without breaking a real scan burst", () => {
     const state = initScanBuffer();
-    const barcode = "6001234567890";
     let t = 0;
-    for (const ch of barcode) {
-      const r = feedScanKey(state, ch, t);
-      if (t > 0) expect(r.suppress).toBe(true); // everything after the unavoidable first char
-      t += 8;
-    }
-    const enterResult = feedScanKey(state, "Enter", t);
-    expect(enterResult.completedScan).toBe(barcode);
-    expect(enterResult.suppress).toBe(true); // Enter itself must be suppressed too (no stray form submit etc.)
+    for (const ch of "600123") { feedScanBuffer(state, ch, t); t += 5; }
+    feedScanBuffer(state, "Shift", t); t += 5; // modifier keydown fires mid-scan on some scanners
+    for (const ch of "4567890") { feedScanBuffer(state, ch, t); t += 5; }
+    expect(feedScanBuffer(state, "Enter", t)).toBe("6001234567890");
   });
 
-  it("never suppresses slow, human-paced keystrokes, and Enter after them is NOT treated as a completed scan", () => {
-    const state = initScanBuffer();
-    const digits = "6001234567890";
-    let t = 0;
-    for (const ch of digits) {
-      const r = feedScanKey(state, ch, t);
-      expect(r.suppress).toBe(false);
-      t += 200; // well beyond scanner speed
-    }
-    const enterResult = feedScanKey(state, "Enter", t);
-    expect(enterResult.completedScan).toBeNull();
-    expect(enterResult.suppress).toBe(false); // ordinary Enter — don't interfere with it
-  });
-
-  it("a burst interrupted by a slow gap falls back to normal (unsuppressed) typing", () => {
-    const state = initScanBuffer();
-    feedScanKey(state, "6", 0);
-    feedScanKey(state, "0", 8); // burst confirmed
-    const interrupted = feedScanKey(state, "0", 300); // long pause — not scanner-like anymore
-    expect(interrupted.suppress).toBe(false);
-    expect(interrupted.burstConfirmed).toBe(false);
-  });
-
-  it("ignores non-character keys (Shift, Tab, arrows) without breaking a burst in progress", () => {
-    const state = initScanBuffer();
-    feedScanKey(state, "6", 0);
-    feedScanKey(state, "0", 8); // bursting = true
-    const modifier = feedScanKey(state, "Shift", 10);
-    expect(modifier.suppress).toBe(false); // modifier keys are never suppressed
-    const next = feedScanKey(state, "0", 16);
-    expect(next.suppress).toBe(true); // burst state survived the ignored key
-  });
-
-  it("rejects a too-short fast burst even though the timing looked scanner-like", () => {
-    const state = initScanBuffer();
-    feedScanKey(state, "1", 0);
-    feedScanKey(state, "2", 5);
+  it("rejects a too-short fast burst even if the timing looks scanner-like", () => {
+    expect(typeString("12", 5)).toBeNull();
     expect("12".length).toBeLessThan(SCAN_MIN_LENGTH);
-    const enterResult = feedScanKey(state, "Enter", 10);
-    expect(enterResult.completedScan).toBeNull();
   });
 
   it("resets cleanly after a completed scan — a second fast burst still works", () => {
     const state = initScanBuffer();
     let t = 0;
-    for (const ch of "111222333") { feedScanKey(state, ch, t); t += 5; }
-    expect(feedScanKey(state, "Enter", t).completedScan).toBe("111222333");
+    for (const ch of "111222333") { feedScanBuffer(state, ch, t); t += 5; }
+    expect(feedScanBuffer(state, "Enter", t)).toBe("111222333");
     t += 5;
-    for (const ch of "444555666") { feedScanKey(state, ch, t); t += 5; }
-    expect(feedScanKey(state, "Enter", t).completedScan).toBe("444555666");
+    for (const ch of "444555666") { feedScanBuffer(state, ch, t); t += 5; }
+    expect(feedScanBuffer(state, "Enter", t)).toBe("444555666");
+  });
+
+  it("a lone fast burst with no Enter never completes (still waiting)", () => {
+    const state = initScanBuffer();
+    let t = 0;
+    for (const ch of "6001234567890") {
+      const result = feedScanBuffer(state, ch, t);
+      expect(result).toBeNull();
+      t += 5;
+    }
   });
 });
