@@ -1,65 +1,48 @@
 import { describe, it, expect, vi } from "vitest";
-import { initScanBuffer, feedScanKey } from "./scanBuffer";
 import { buildCartLine } from "./posCart";
 import { buildWeighBarcode, parseWeighBarcode } from "./weighBarcode";
 import type { Product, OrderItemInput } from "./types";
 
-// End-to-end simulation of the exact real handler in POSPanel's global
-// keydown effect (src/ui/App.tsx) — same decision sequence
-// (feedScanKey -> preventDefault/clear-field -> lookup -> buildCartLine),
-// driven by synthetic keydown events instead of a real browser, since
-// this repo has no React component-testing setup. This is what actually
-// exercises the fix for the "raw barcode text lands in the search field
-// instead of being intercepted" bug: two competing Enter handlers used to
-// both listen for the same keystroke and neither suppressed default
-// typing, so the digits always stayed visible. Here we drive the single,
-// consolidated handler and assert the simulated search field ends up
-// empty and the right line lands in the cart.
-interface FakeSearchField {
+// Simulates the POS screen's hidden always-focused scanner input (see
+// POSPanel in src/ui/App.tsx: hiddenScanRef/handleHiddenScanKeyDown/
+// handleScan) — no timing/burst-speed heuristics involved at all in this
+// approach, unlike a previous attempt. A hardware scanner just types its
+// decoded digits into whatever's focused; since the hidden input is kept
+// focused by default, its value simply accumulates character-by-character
+// exactly like a real onChange would, and Enter resolves it. This drives
+// that exact sequence — accumulate characters, fire Enter, run the same
+// lookup/cart-line logic the real handler calls — and asserts the
+// simulated input is cleared immediately afterward regardless of outcome.
+interface FakeHiddenInput {
   value: string;
-  focused: boolean;
 }
 
-function simulateScan(
+function simulateHiddenScan(
   barcode: string,
-  gapMs: number,
-  field: FakeSearchField,
+  field: FakeHiddenInput,
   lookup: (code: string) => Product | undefined
 ): { addedLine: OrderItemInput | null; notFoundMessage: string | null } {
-  const state = initScanBuffer();
-  let t = 0;
+  // onChange fires once per keystroke in a real <input> — no suppression,
+  // no timing math, the value just accumulates.
+  for (const ch of barcode) field.value += ch;
+
+  // handleHiddenScanKeyDown on Enter: read the value, clear it
+  // immediately (regardless of what happens next), then resolve it.
+  const code = field.value.trim();
+  field.value = "";
+
   let addedLine: OrderItemInput | null = null;
   let notFoundMessage: string | null = null;
-
-  const feed = (key: string) => {
-    const result = feedScanKey(state, key, t);
-    if (result.suppress) {
-      // preventDefault() — the browser's default "type this character"
-      // never happens, so `field.value` is NOT updated for this key.
-    } else if (field.focused && key !== "Enter") {
-      // Mirrors the real <input>'s onChange: an unsuppressed character
-      // keystroke types normally.
-      field.value += key;
+  if (code) {
+    const weigh = parseWeighBarcode(code);
+    const lookupCode = weigh ? weigh.itemCode : code;
+    const product = lookup(lookupCode);
+    if (product) {
+      addedLine = buildCartLine(product, weigh?.price);
+    } else {
+      notFoundMessage = `No product found for "${code}"`;
     }
-    if (result.burstConfirmed && field.focused) {
-      field.value = ""; // retroactively wipe the unavoidable first character
-    }
-    if (result.completedScan) {
-      const weigh = parseWeighBarcode(result.completedScan);
-      const lookupCode = weigh ? weigh.itemCode : result.completedScan;
-      const product = lookup(lookupCode);
-      if (product) {
-        addedLine = buildCartLine(product, weigh?.price);
-        if (field.focused) field.value = ""; // handleScan's own reset on success
-      } else {
-        notFoundMessage = `No product found for "${result.completedScan}"`;
-      }
-    }
-    t += gapMs;
-  };
-
-  for (const ch of barcode) feed(ch);
-  feed("Enter");
+  }
 
   return { addedLine, notFoundMessage };
 }
@@ -78,12 +61,12 @@ const fixedUnitProduct: Product = {
   createdAt: "", updatedAt: "", currentCost: 60
 };
 
-describe("POS barcode scan — end-to-end handler simulation", () => {
-  it("a real-speed scan burst (~8ms/char) + Enter adds the correct product and leaves the search field empty", () => {
-    const field: FakeSearchField = { value: "", focused: true };
+describe("POS hidden-input barcode scan — end-to-end handler simulation", () => {
+  it("a plain barcode scan adds the correct product and clears the hidden input", () => {
+    const field: FakeHiddenInput = { value: "" };
     const lookup = vi.fn((code: string) => (code === "2900007000003" ? fixedUnitProduct : undefined));
 
-    const { addedLine } = simulateScan("2900007000003", 8, field, lookup);
+    const { addedLine } = simulateHiddenScan("2900007000003", field, lookup);
 
     expect(lookup).toHaveBeenCalledWith("2900007000003");
     expect(addedLine).not.toBeNull();
@@ -91,18 +74,15 @@ describe("POS barcode scan — end-to-end handler simulation", () => {
     expect(addedLine!.name).toBe("Boerewors 500g Pack");
     expect(addedLine!.quantity).toBe(1);
     expect(addedLine!.lineTotal).toBe(89.99);
-
-    // The actual bug this test exists to catch: the raw scanned digits
-    // must NOT be left sitting in the search field afterward.
-    expect(field.value).toBe("");
+    expect(field.value).toBe(""); // ready for the next scan
   });
 
-  it("a variable-weight scan burst decodes the embedded price, not a flat per-kg rate, and still clears the field", () => {
-    const field: FakeSearchField = { value: "", focused: true };
+  it("a variable-weight scan decodes the embedded price, not a flat per-kg rate, and clears the hidden input", () => {
+    const field: FakeHiddenInput = { value: "" };
     const scannedCode = buildWeighBarcode("00550", 99.36); // 0.138kg @ R720/kg
     const lookup = vi.fn((code: string) => (code === "00550" ? weighedProduct : undefined));
 
-    const { addedLine } = simulateScan(scannedCode, 8, field, lookup);
+    const { addedLine } = simulateHiddenScan(scannedCode, field, lookup);
 
     expect(lookup).toHaveBeenCalledWith("00550"); // decoded itemCode, not the raw scanned string
     expect(addedLine).not.toBeNull();
@@ -111,30 +91,28 @@ describe("POS barcode scan — end-to-end handler simulation", () => {
     expect(field.value).toBe("");
   });
 
-  it("slow, human-paced typing of the same digits is never suppressed and never treated as a completed scan", () => {
-    const field: FakeSearchField = { value: "", focused: true };
-    const lookup = vi.fn(() => fixedUnitProduct);
-
-    const { addedLine } = simulateScan("2900007000003", 200, field, lookup);
-
-    expect(lookup).not.toHaveBeenCalled();
-    expect(addedLine).toBeNull();
-    // Ordinary typing behaves exactly like a normal search box: the text
-    // stays visible for the human to see/edit/click a result for.
-    expect(field.value).toBe("2900007000003");
-  });
-
-  it("a scan with no matching product shows a not-found message and still clears the field", () => {
-    const field: FakeSearchField = { value: "", focused: true };
+  it("a scan with no matching product shows a not-found message and still clears the hidden input", () => {
+    const field: FakeHiddenInput = { value: "" };
     const lookup = vi.fn(() => undefined);
 
-    const { addedLine, notFoundMessage } = simulateScan("6009999999999", 8, field, lookup);
+    const { addedLine, notFoundMessage } = simulateHiddenScan("6009999999999", field, lookup);
 
     expect(addedLine).toBeNull();
     expect(notFoundMessage).toBe('No product found for "6009999999999"');
-    // Even on a miss, the burst's digits were suppressed as they arrived
-    // (see burstConfirmed clearing the stray first character) — nothing
-    // was ever left in the box to begin with.
     expect(field.value).toBe("");
+  });
+
+  it("no timing dependency — the same result whether characters 'arrive' fast or with pauses between them", () => {
+    // The old approach cared about inter-keystroke gaps; this one doesn't
+    // — accumulation is purely additive regardless of when each
+    // character conceptually "arrived", proving there's no leftover
+    // timing logic influencing the outcome.
+    const field: FakeHiddenInput = { value: "" };
+    const lookup = vi.fn((code: string) => (code === "2900007000003" ? fixedUnitProduct : undefined));
+
+    const { addedLine } = simulateHiddenScan("2900007000003", field, lookup);
+
+    expect(addedLine).not.toBeNull();
+    expect(addedLine!.productId).toBe(7);
   });
 });

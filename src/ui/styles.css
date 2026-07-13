@@ -2316,6 +2316,30 @@ button.sm {
   letter-spacing: 0.05em;
 }
 
+/* The actual scanner target (see hiddenScanRef in POSPanel) — invisible
+   but still a real, focusable, in-document input so a hardware
+   keyboard-wedge scanner can type into it. Not display:none/visibility:
+   hidden, which would make it unfocusable in some browsers. */
+.pos-hidden-scan-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: none;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Diagnostic line for confirming the hidden input is actually receiving
+   scanner keystrokes — safe to delete once confirmed working on real
+   hardware. */
+.pos-scan-debug {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+  font-family: ui-monospace, "Courier New", monospace;
+}
+
 .pos-search-row {
   display: flex;
   gap: 10px;

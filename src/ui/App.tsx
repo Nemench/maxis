@@ -51,7 +51,6 @@ import { parseWeighBarcode, buildWeighBarcode } from "../shared/weighBarcode";
 import { generateInternalBarcode } from "../shared/internalBarcode";
 import { flattenBatch, totalBatchCount, placeOnSheets, type LabelBatchEntry } from "../shared/labelBatch";
 import { calculateLineTotal, buildCartLine } from "../shared/posCart";
-import { initScanBuffer, feedScanKey } from "../shared/scanBuffer";
 import type {
   CreateOrderInput,
   DeliveryAddress,
@@ -1041,74 +1040,91 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
     });
   };
 
-  // Global scanner-wedge capture — the SINGLE authority for detecting a
-  // scan; there is no second, competing Enter-triggered handler anywhere
-  // else (the search input's onKeyDown was removed — see the input's own
-  // comment). A hardware barcode scanner (USB or Bluetooth HID — both
-  // present to the OS as a plain keyboard) types its decoded digits as
-  // very fast, back-to-back keystrokes followed by Enter — nothing a
-  // human types matches that cadence, so feedScanKey (shared/
-  // scanBuffer.ts, unit-tested there against both fast and slow timing)
-  // distinguishes a real scan from ordinary typing without needing focus
-  // to sit in any particular field.
+  // Scanner capture — the "always-focused hidden input" pattern real POS
+  // systems use, replacing an earlier timing-heuristic approach (global
+  // keydown listener trying to distinguish scanner speed from human
+  // typing) that proved unreliable in practice. No timing math at all: a
+  // hardware barcode scanner (USB or Bluetooth HID) just types its
+  // decoded digits followed by Enter into WHATEVER currently has focus,
+  // indistinguishable from a human typist — so instead of guessing from
+  // keystroke speed, a dedicated, visually-hidden text input
+  // (hiddenScanRef, rendered once below) is kept focused by default
+  // whenever no other REAL field is intentionally in use. A scan's
+  // keystrokes land there naturally, and Enter completes it — see
+  // handleHiddenScanKeyDown.
   //
-  // Every keystroke feedScanKey confirms as part of a burst is
-  // preventDefault'd, so a scan's digits never actually get typed into
-  // whatever's focused — EXCEPT the burst's first character, which is
-  // unavoidably typed before there's a second keystroke to compare
-  // timing against (see feedScanKey's own comment on burstConfirmed).
-  // The moment the second fast keystroke confirms it's really a burst,
-  // that stray first character is retroactively wiped from the search
-  // box (if that's what's focused) — in practice this happens within a
-  // single scan's ~10-50ms total duration, well before a human could
-  // perceive it.
-  //
-  // Skipped entirely while focus is in a genuine free-text field (buyer
-  // name/address/customer contact details) so a scan can never corrupt
-  // those, but works whether focus is on the search box, nowhere in
-  // particular, or the page body — the "doesn't need to sit in a
-  // specific field" behavior the spec asks for.
+  // "Intentionally in use" is tracked via document-level focusin/focusout
+  // (not per-field onFocus/onBlur wiring, which would need updating every
+  // time a new input is added to this screen and is easy to forget) —
+  // whenever a real <input>/<textarea> other than the hidden one gains
+  // focus, hidden-refocusing is suspended; the moment focus leaves it
+  // (clicking away, Escape, Tab), the hidden input reclaims focus so the
+  // NEXT scan still lands correctly with zero clicks.
+  const hiddenScanRef = useRef<HTMLInputElement>(null);
+  const HIDDEN_SCAN_ID = "pos-hidden-scan-input";
+  const [hiddenScanFocused, setHiddenScanFocused] = useState(false);
+  const [hiddenScanValue, setHiddenScanValue] = useState("");
+  const [realInputFocused, setRealInputFocused] = useState(false);
+
   useEffect(() => {
-    const state = initScanBuffer();
+    const isRealInput = (el: Element | null): boolean =>
+      el instanceof HTMLElement && (el.tagName === "INPUT" || el.tagName === "TEXTAREA") && el.id !== HIDDEN_SCAN_ID;
 
-    const onKeyDown = (e: KeyboardEvent) => {
-      const active = document.activeElement;
-      const isSearchField = active instanceof HTMLElement && active.id === "pos-scan-search";
-      const inOtherProtectedField = active instanceof HTMLElement
-        && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")
-        && !isSearchField;
-      if (inOtherProtectedField) { state.buffer = ""; state.bursting = false; return; }
-
-      const result = feedScanKey(state, e.key, Date.now());
-      if (result.suppress) e.preventDefault();
-      if (result.burstConfirmed && isSearchField) setSearch("");
-      if (result.completedScan) void handleScan(result.completedScan);
+    const refocusHidden = () => {
+      if (!isRealInput(document.activeElement)) hiddenScanRef.current?.focus({ preventScroll: true });
     };
 
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [products]); // eslint-disable-line react-hooks/exhaustive-deps
+    const onFocusIn = (e: FocusEvent) => setRealInputFocused(isRealInput(e.target as Element));
+    const onFocusOut = () => {
+      // Deferred: at the moment focusout fires, document.activeElement
+      // hasn't updated to the NEXT element yet (if any) — by the time
+      // this runs, it has, so this correctly sees "did focus land on a
+      // real field, or nowhere/away" before deciding to steal it back.
+      window.setTimeout(refocusHidden, 0);
+      setRealInputFocused(false);
+    };
 
-  // Called only from the global scanner-wedge listener above now (the
-  // search input's own Enter handler was removed — it raced against this
-  // exact function, which is what caused a scan to sometimes fire twice
-  // and never suppressed the raw digits from showing up in the box). A
-  // weigh-label decodes to an itemCode + the actual price that label was
-  // printed for (see parseWeighBarcode); a plain product barcode is
-  // looked up as-is. Gives an immediate audio + visual cue on success
-  // (see playScanBeep/flashLineIndex) since staff aren't necessarily
-  // watching the screen while scanning, and a brief, non-blocking inline
-  // message on failure rather than a modal that would stop them working.
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
+    refocusHidden(); // claim focus on mount
+    return () => {
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
+    };
+  }, []);
+
+  const handleHiddenScanKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const code = hiddenScanValue.trim();
+    setHiddenScanValue(""); // always clear immediately — ready for the next scan regardless of outcome
+    if (code) void handleScan(code);
+  };
+
+  // Reused by both the hidden scanner input above and anything else that
+  // wants to resolve a raw scanned/typed code (same lookup functions the
+  // manual add path uses — see parseWeighBarcode/api.products.getBy*,
+  // and buildCartLine, the SAME cart-line builder a manual tile tap
+  // calls). A weigh-label decodes to an itemCode + the actual price that
+  // label was printed for; a plain product barcode is looked up as-is.
+  // Gives an immediate audio + visual cue on success (see
+  // playScanBeep/flashLineIndex) since staff aren't necessarily watching
+  // the screen while scanning, and a brief, non-blocking inline message
+  // on failure rather than a modal that would stop them working.
   const handleScan = async (code: string) => {
+    console.log(`[pos-scan] lookup starting for raw code: "${code}"`);
     const weigh = parseWeighBarcode(code);
     const lookupCode = weigh ? weigh.itemCode : code;
+    console.log(`[pos-scan] ${weigh ? `decoded as a weigh-label — itemCode ${lookupCode}, price ${weigh.price}` : `plain barcode — looking up ${lookupCode}`}`);
     try {
       const product = weigh ? await api.products.getByItemCode(lookupCode) : await api.products.getByBarcode(lookupCode);
+      console.log(`[pos-scan] matched product:`, product.id, product.name);
       scanFlashPending.current = true;
       addToCart(product, weigh?.price);
       playScanBeep();
-      setSearch("");
+      console.log(`[pos-scan] added to cart`);
     } catch {
+      console.log(`[pos-scan] no product found for "${code}"`);
       setScanError(`No product found for "${code}"`);
       window.setTimeout(() => setScanError(""), 3000);
     }
@@ -1220,29 +1236,51 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
         <div className="pos-scan-panel">
           <label htmlFor="pos-scan-search" className="pos-scan-label">Scan or search a product</label>
           <div className="pos-search-row">
-            {/* No onKeyDown here — the global scanner-wedge listener
-                (see the useEffect above) is the single authority for
-                Enter-triggered scan completion. A second, independent
-                Enter handler here previously raced against it: neither
-                suppressed the browser's default typing, so a scan's
-                digits always ended up sitting in this field as literal
-                text, and a completed scan could fire handleScan twice.
-                onChange below is unaffected — normal (non-burst) typing
-                still updates `search` for the manual-fallback matches
-                list, since the global listener only preventDefaults
-                keystrokes it's confirmed are part of a fast burst. */}
+            {/* Manual fallback only — this is a REAL, ordinary input, a
+                separate element entirely from the hidden scanner input
+                below, so there's nothing here for it to race against.
+                Typing updates `search` for the live matches list;
+                pressing Enter treats whatever's currently typed as a
+                barcode to look up directly (handleScan reuses the exact
+                same lookup as an actual scan). */}
             <input
               id="pos-scan-search"
               className="pos-search"
               placeholder="Scan a barcode, or type a name…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              autoFocus
+              onKeyDown={(e) => { if (e.key === "Enter" && search.trim()) { void handleScan(search.trim()); setSearch(""); } }}
             />
             <button type="button" className="secondary" onClick={() => { setReorderError(""); setReorderScanOpen(true); }} title="Scan a past receipt to add its items to this sale">
               <ScanLine size={16} /> Reorder
             </button>
           </div>
+
+          {/* The actual scanner target — permanently focused by default
+              (see the useEffect above), 1x1px and visually hidden so
+              scanned text is never seen sitting in a field, but still a
+              real, focusable input so a hardware keyboard-wedge scanner
+              can type into it. */}
+          <input
+            ref={hiddenScanRef}
+            id={HIDDEN_SCAN_ID}
+            className="pos-hidden-scan-input"
+            value={hiddenScanValue}
+            onChange={(e) => setHiddenScanValue(e.target.value)}
+            onKeyDown={handleHiddenScanKeyDown}
+            onFocus={() => setHiddenScanFocused(true)}
+            onBlur={() => setHiddenScanFocused(false)}
+            aria-hidden="true"
+            tabIndex={-1}
+          />
+
+          {/* Diagnostic line for verifying the scanner is actually
+              reaching the hidden input, per explicit request — safe to
+              remove once confirmed working on real hardware. */}
+          <p className="pos-scan-debug">
+            Hidden scan input focused: {String(hiddenScanFocused)} · Real input focused: {String(realInputFocused)} · Last raw input: {hiddenScanValue || "(empty)"}
+          </p>
+
           {searchMatches.length > 0 && (
             <div className="pos-search-matches">
               {searchMatches.map((p) => (
