@@ -1922,6 +1922,7 @@ button.sm {
 
 /* ── CRM ── */
 .muted { color: var(--muted); }
+.mono { font-family: "SF Mono", "Roboto Mono", Consolas, monospace; font-size: 12px; white-space: nowrap; }
 .active-row { background: var(--bg-hover, rgba(59, 130, 246, 0.08)); }
 
 .crm-search { margin-bottom: 10px; }

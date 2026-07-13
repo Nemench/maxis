@@ -2753,15 +2753,21 @@ function Products({ products, onChanged }: { products: Product[]; onChanged: () 
             <EmptyState title="No matches" detail="No items match that search." />
           ) : (
           <table>
-            <thead><tr><th>Name</th><th>Category</th><th>Dept</th><th>R/kg</th><th>On hand</th><th>Notes</th><th></th></tr></thead>
+            <thead><tr><th>Name</th><th>Category</th><th>Dept</th><th>Barcode</th><th>R/kg</th><th>On hand</th><th>Notes</th><th></th></tr></thead>
             <tbody>
               {filteredProducts.map((p) => {
                 const low = p.lowStockThreshold != null && p.onHandQty <= p.lowStockThreshold;
+                const isWeighed = p.unitDefault !== "qty";
                 return (
                 <tr key={p.id}>
                   <td>{p.name}</td>
                   <td>{p.category}</td>
                   <td><span className={`dept-badge ${p.department}`}>{p.department}</span></td>
+                  <td className="mono">
+                    {isWeighed
+                      ? (p.itemCode ? `PLU ${p.itemCode}` : <span className="muted">No item code</span>)
+                      : (p.barcode ?? <span className="muted">No barcode</span>)}
+                  </td>
                   <td>{p.pricePerUnit ? currency.format(p.pricePerUnit) : ""}</td>
                   <td>{p.onHandQty}{low && <span className="low-stock-badge">Low</span>}</td>
                   <td>{p.prepNotes}</td>
