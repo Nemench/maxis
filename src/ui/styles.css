@@ -2291,10 +2291,23 @@ button.sm {
   gap: 14px;
 }
 
-.pos-catalog-controls {
+/* Scan/search panel — the primary, calm entry point at the top of the
+   idle screen (see LAYOUT SPEC). Deliberately roomier padding than a
+   normal search box so it reads as THE way to start a sale, not just
+   another filter field. */
+.pos-scan-panel {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
+  padding: 4px;
+}
+
+.pos-scan-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .pos-search-row {
@@ -2308,12 +2321,63 @@ button.sm {
 
 .pos-search {
   width: 100%;
-  padding: 14px 16px;
-  font-size: 16px;
+  padding: 18px 18px;
+  font-size: 18px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--input-bg);
   color: var(--text);
+}
+
+.pos-search-matches {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.pos-search-match {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 14px;
+}
+
+.pos-search-match:hover {
+  background: var(--chip-bg);
+}
+
+/* Quick picks + category buttons — the only things visible below the
+   scan panel in the idle state; the section label keeps the row
+   identifiable without needing a heavier heading treatment. */
+.pos-section-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.pos-quickpicks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pos-quickpicks-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
 }
 
 .pos-category-tabs {
@@ -2430,13 +2494,6 @@ button.sm {
   font-family: "Courier New", ui-monospace, monospace;
 }
 
-.pos-receipt h3 {
-  margin: 0;
-  font-size: 15px;
-  font-family: Inter, sans-serif;
-  color: var(--accent-text);
-}
-
 .pos-receipt-actions {
   display: flex;
   gap: 10px;
@@ -2460,83 +2517,166 @@ button.sm {
   color: var(--muted);
 }
 
-.pos-receipt-lines {
+/* Till slip — styled to actually look like a printed receipt (monospace,
+   dashed dividers) rather than a generic card list, and IS the sale's
+   single source of truth: no separate/duplicate cart summary lives
+   anywhere else on this screen. Read-only display except for tapping a
+   line to select it (see .till-slip-line) — editing happens via the
+   numeric keypad below, not inline controls baked into the slip. */
+.till-slip {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 10px;
+  gap: 6px;
+  padding: 4px 2px;
 }
 
-.pos-receipt-line {
+.till-slip-header {
+  text-align: center;
+}
+
+.till-slip-business {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+.till-slip-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.till-slip-divider {
+  border-top: 1px dashed var(--muted);
+  margin: 4px 0;
+}
+
+.till-slip-empty {
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 16px 0;
+}
+
+.till-slip-lines {
   display: flex;
   flex-direction: column;
+  gap: 2px;
+}
+
+.till-slip-line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+}
+
+.till-slip-line.selected {
+  background: var(--chip-bg);
+  outline: 1px solid var(--blue);
+}
+
+@keyframes till-slip-line-flash {
+  0%, 100% { background: transparent; }
+  30% { background: var(--green-light); }
+}
+
+.till-slip-line.flash {
+  animation: till-slip-line-flash 0.7s ease-out;
+}
+
+.till-slip-line-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.till-slip-line-name {
+  font-weight: 700;
+}
+
+.till-slip-line-total {
+  white-space: nowrap;
+}
+
+.till-slip-line-detail {
+  font-size: 12px;
+  color: var(--muted);
+  padding-left: 4px;
+}
+
+.till-slip-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.till-slip-total {
+  font-weight: 800;
+  font-size: 17px;
+}
+
+/* Numeric keypad — the manual weight/quantity entry point for whichever
+   slip line is selected, kept as its own block so the slip itself stays
+   a clean receipt-styled read display. */
+.pos-keypad {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pos-keypad-disabled {
+  opacity: 0.5;
+}
+
+.pos-keypad-display {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--input-bg);
+  font-size: 22px;
+  font-weight: 700;
+  font-family: ui-monospace, "Courier New", monospace;
+}
+
+.pos-keypad-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
   gap: 6px;
-  padding-bottom: 8px;
-  border-bottom: 1px dashed var(--border);
 }
 
-.pos-receipt-line:last-child {
-  border-bottom: none;
-}
-
-.pos-receipt-line-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-}
-
-.pos-receipt-line-name {
-  font-weight: 600;
-  font-size: 14px;
-}
-
-.pos-receipt-line-controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.pos-stepper {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.pos-stepper button {
-  width: 36px;
-  height: 36px;
-  min-width: 36px;
+.pos-keypad-grid button {
+  min-height: 48px;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--chip-bg);
   color: var(--text);
   font-size: 18px;
   font-weight: 700;
-  line-height: 1;
 }
 
-.pos-stepper span {
-  min-width: 56px;
-  text-align: center;
-  font-weight: 600;
-  font-size: 13px;
-}
-
-.pos-receipt-line-total {
-  font-weight: 700;
-  color: var(--accent-text);
-  white-space: nowrap;
-}
-
-.pos-receipt-breakdown {
+.pos-keypad-actions {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  gap: 6px;
+}
+
+.pos-keypad-actions button {
+  flex: 1;
+  min-height: 44px;
+  font-size: 13px;
 }
 
 .pos-invoice-fields {
@@ -2560,14 +2700,6 @@ button.sm {
   gap: 4px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--muted);
-}
-
-.pos-breakdown-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 14px;
   color: var(--muted);
 }
 
@@ -2676,14 +2808,6 @@ button.sm {
 .pos-change-due.short {
   background: var(--red-light);
   color: var(--red);
-}
-
-.pos-breakdown-total {
-  font-size: 20px;
-  font-weight: 800;
-  color: var(--text);
-  padding-top: 6px;
-  border-top: 2px solid var(--text);
 }
 
 .pos-charge-btn {

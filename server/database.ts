@@ -364,6 +364,48 @@ export class KotDatabase {
       .all() as Product[];
   }
 
+  // POS "quick picks" row — an admin's manually-pinned product list
+  // (posQuickPickIds setting, comma-separated ids, in the order they
+  // should appear) if one's been set, otherwise auto-derived from actual
+  // recent sales: top N products by number of order-item lines in the
+  // last 30 days, so it tracks what's actually selling right now rather
+  // than a stale all-time snapshot. Configurable, never hardcoded.
+  getQuickPickProducts(limit = 6): Product[] {
+    const pinnedRaw = (this.db.prepare("SELECT value FROM settings WHERE key = 'posQuickPickIds'").get() as { value: string } | undefined)?.value ?? "";
+    const pinnedIds = pinnedRaw.split(",").map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
+
+    if (pinnedIds.length > 0) {
+      const placeholders = pinnedIds.map(() => "?").join(",");
+      const rows = this.db.prepare(`
+        SELECT p.id, p.name, p.category, p.unitDefault, p.pricePerUnit, p.prepNotes, p.department, p.isActive,
+               p.lowStockThreshold, COALESCE(SUM(ps.qty), 0) as onHandQty, p.lastCountedAt, p.lastCountedById,
+               p.barcode, p.itemCode, p.isRawIntake, p.createdAt, p.updatedAt, ${KotDatabase.currentCostSql()}
+        FROM products p
+        LEFT JOIN product_stock ps ON ps.productId = p.id
+        WHERE p.isActive = 1 AND p.id IN (${placeholders})
+        GROUP BY p.id`
+      ).all(...pinnedIds) as Product[];
+      // Preserve the admin's chosen order — SQL's IN() gives no ordering
+      // guarantee of its own.
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      return pinnedIds.map((id) => byId.get(id)).filter((p): p is Product => !!p).slice(0, limit);
+    }
+
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    return this.db.prepare(`
+      SELECT p.id, p.name, p.category, p.unitDefault, p.pricePerUnit, p.prepNotes, p.department, p.isActive,
+             p.lowStockThreshold, COALESCE(SUM(ps.qty), 0) as onHandQty, p.lastCountedAt, p.lastCountedById,
+             p.barcode, p.itemCode, p.isRawIntake, p.createdAt, p.updatedAt, ${KotDatabase.currentCostSql()}
+      FROM products p
+      LEFT JOIN product_stock ps ON ps.productId = p.id
+      WHERE p.isActive = 1
+      GROUP BY p.id
+      HAVING (SELECT COUNT(*) FROM order_items oi JOIN orders o ON o.id = oi.orderId WHERE oi.productId = p.id AND o.createdAt >= ?) > 0
+      ORDER BY (SELECT COUNT(*) FROM order_items oi JOIN orders o ON o.id = oi.orderId WHERE oi.productId = p.id AND o.createdAt >= ?) DESC
+      LIMIT ?`
+    ).all(since, since, limit) as Product[];
+  }
+
   getProductByBarcode(barcode: string): Product | null {
     return this.db
       .prepare(`SELECT p.*, ${KotDatabase.currentCostSql()} FROM products p WHERE p.barcode = ? AND p.isActive = 1`)
@@ -2061,6 +2103,9 @@ export class KotDatabase {
     // shop actually bought), so guessing wrong would be worse than
     // leaving it unset until an admin picks one in Settings > Printing.
     this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('activeLabelSheetFormat', '')").run();
+    // Blank means "auto" — see getQuickPickProducts for the fallback to
+    // recent-sales-frequency when no admin has pinned anything.
+    this.db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('posQuickPickIds', '')").run();
 
     // Seed default order-notification message templates (see the
     // order_message_templates schema comment above) — INSERT OR IGNORE

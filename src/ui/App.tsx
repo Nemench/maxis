@@ -50,6 +50,8 @@ import { appSettings } from "../shared/settings";
 import { parseWeighBarcode, buildWeighBarcode } from "../shared/weighBarcode";
 import { generateInternalBarcode } from "../shared/internalBarcode";
 import { flattenBatch, totalBatchCount, placeOnSheets, type LabelBatchEntry } from "../shared/labelBatch";
+import { calculateLineTotal, buildCartLine } from "../shared/posCart";
+import { initScanBuffer, feedScanBuffer } from "../shared/scanBuffer";
 import type {
   CreateOrderInput,
   DeliveryAddress,
@@ -361,6 +363,30 @@ function LicenseStatusBanner() {
 let globalToast: ((text: string, tone: "info" | "error") => void) | null = null;
 function showToast(text: string, tone: "info" | "error" = "info") {
   globalToast?.(text, tone);
+}
+
+// A short, synthesized beep (Web Audio API — no audio file, no external
+// call) confirming a barcode scan was received and processed, so a
+// cashier who isn't watching the screen closely still gets immediate
+// feedback. Silently does nothing if the Web Audio API is unavailable or
+// blocked (e.g. before any user interaction on some browsers) — the
+// visual flash on the till slip line (see flashLineIndex in POSPanel)
+// still confirms it either way, this is a bonus, not the only cue.
+function playScanBeep() {
+  try {
+    const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.frequency.value = 880;
+    gain.gain.value = 0.15;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.08);
+    osc.onended = () => void ctx.close();
+  } catch { /* audio unavailable — the visual flash still confirms the scan */ }
 }
 
 // Print-behavior preferences — same module-level-cache reasoning as
@@ -821,9 +847,33 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
   };
 
   const [search, setSearch] = useState("");
-  const [category, setCategory] = useState("All");
+  // Which category's product list is expanded below the category-button
+  // row — null (the idle default) shows no product list at all, only the
+  // scan panel/quick picks/category buttons themselves. This is what
+  // keeps the default screen state minimal instead of always rendering
+  // the full catalog (see categoryProducts below, which is now only
+  // computed/rendered while a category is actually expanded).
+  const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
+  const [quickPicks, setQuickPicks] = useState<Product[]>([]);
+  const [scanError, setScanError] = useState("");
   const [cart, setCart] = useState<OrderItemInput[]>(() => loadSavedSale().cart);
   const [discount, setDiscount] = useState(() => loadSavedSale().discount);
+  // Which cart line the numeric keypad is currently editing — set
+  // automatically to whichever line was just added (see the effect
+  // below), or by tapping a line in the till slip. null means nothing's
+  // selected (keypad shows disabled/blank).
+  const [selectedLine, setSelectedLine] = useState<number | null>(null);
+  const [keypadValue, setKeypadValue] = useState("");
+  // Briefly highlighted till-slip line index — the visual half of the
+  // "a scan was received and processed" confirmation (see handleScan/
+  // playScanBeep), since staff scanning items aren't necessarily looking
+  // at the screen closely enough to notice a new line appearing on its own.
+  const [flashLineIndex, setFlashLineIndex] = useState<number | null>(null);
+  // Set right before a scan-triggered addToCart call, consumed (and
+  // cleared) by the cart-growth effect below — lets that effect tell a
+  // scan-add apart from a manual tile tap without needing to plumb an
+  // extra argument through setCart's updater.
+  const scanFlashPending = useRef(false);
   // Opens a dedicated modal to enter/change the discount, rather than a
   // plain always-visible number field — a bare inline input next to a
   // dozen other numbers on the receipt is too easy to miss as an actual
@@ -897,14 +947,16 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
     localStorage.setItem(posSaleKey, JSON.stringify({ cart, discount }));
   }, [cart, discount]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const categories = useMemo(() => ["All", ...Array.from(new Set(products.map((p) => p.category || "Other"))).sort()], [products]);
+  // "All" deliberately excluded — there's no idle-state "show everything"
+  // button anymore (see LAYOUT SPEC: category → filtered list only on
+  // demand, catalog never rendered whole).
+  const categories = useMemo(() => Array.from(new Set(products.map((p) => p.category || "Other"))).sort(), [products]);
 
   // Fixed hue order (never reassigned by filtering/sorting elsewhere) so a
   // category's color stays put — the 9th+ category folds into a neutral
   // "other" badge rather than wrapping back onto an already-used hue.
-  const sortedCategories = useMemo(() => categories.filter((c) => c !== "All"), [categories]);
   const categoryBadgeClass = (cat: string) => {
-    const idx = sortedCategories.indexOf(cat);
+    const idx = categories.indexOf(cat);
     return idx >= 0 && idx < 8 ? `pos-cat-${idx + 1}` : "pos-cat-other";
   };
 
@@ -916,23 +968,62 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
     return words.length > 1 ? (words[0][0] + words[1][0]).toUpperCase() : name.slice(0, 2).toUpperCase();
   };
 
-  const visibleProducts = useMemo(() => {
+  // Only computed/rendered while a category is actually expanded — the
+  // idle screen never mounts a product grid at all (see expandedCategory).
+  const categoryProducts = useMemo(() => {
+    if (!expandedCategory) return [];
+    return products.filter((p) => (p.category || "Other") === expandedCategory).sort((a, b) => a.name.localeCompare(b.name));
+  }, [products, expandedCategory]);
+
+  // Manual-fallback search matches — a small results list under the scan
+  // panel, same "search reveals results, nothing shown otherwise" pattern
+  // used by the product search elsewhere in this app (Print Labels, Stock).
+  const searchMatches = useMemo(() => {
     const q = search.trim().toLowerCase();
+    if (!q) return [];
     return products
-      .filter((p) => category === "All" || (p.category || "Other") === category)
-      .filter((p) => !q || p.name.toLowerCase().includes(q))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [products, category, search]);
+      .filter((p) => p.name.toLowerCase().includes(q) || (p.barcode ?? "").includes(q) || (p.itemCode ?? "").includes(q))
+      .slice(0, 8);
+  }, [products, search]);
+
+  useEffect(() => {
+    api.products.quickPicks().then(setQuickPicks).catch(() => undefined);
+  }, []);
+
+  // Auto-selects whichever line was just appended (scan, tile tap, or
+  // search) so the numeric keypad is immediately ready to accept a real
+  // weight/quantity for it — the natural next step at a real till right
+  // after an item lands on the slip. Only fires on growth, not on every
+  // cart change (editing/removing a line shouldn't yank the selection
+  // away from what the cashier is actively working on).
+  const prevCartLength = useRef(cart.length);
+  useEffect(() => {
+    if (cart.length > prevCartLength.current) {
+      const newIndex = cart.length - 1;
+      setSelectedLine(newIndex);
+      const line = cart[newIndex];
+      setKeypadValue(line ? String(line.kg ?? line.quantity ?? "") : "");
+      if (scanFlashPending.current) {
+        setFlashLineIndex(newIndex);
+        window.setTimeout(() => setFlashLineIndex(null), 700);
+      }
+    }
+    scanFlashPending.current = false;
+    prevCartLength.current = cart.length;
+  }, [cart]);
 
   // Tapping a tile either bumps an existing line's qty (count-priced items,
-  // where "tap 3 times" is the natural touch gesture) or adds a new 1kg line
-  // (weight-priced items, where the weight still needs confirming/editing —
-  // see the stepper below) rather than trying to guess a sensible default kg.
-  // Blocked entirely for a product with no recorded cost price — the
-  // server enforces this too (see createOrder's cost check), this is just
-  // the earlier, friendlier stop.
-  const addToCart = (p: Product) => {
+  // where "tap 3 times" is the natural touch gesture) or adds a new line
+  // (weight-priced items, where the weight still needs confirming via the
+  // keypad below) rather than trying to guess a sensible default kg.
+  // `wantedPrice`, when given (a real scale weigh-label was scanned — see
+  // resolveScannedProduct), pre-fills the actual weight that label was for
+  // instead of a generic 1kg placeholder. Blocked entirely for a product
+  // with no recorded cost price — the server enforces this too (see
+  // createOrder's cost check), this is just the earlier, friendlier stop.
+  const addToCart = (p: Product, wantedPrice?: number) => {
     if (p.currentCost == null) { setError(`"${p.name}" has no cost price set — add one in Stock before selling it.`); return; }
+    setError(""); setScanError("");
     setCart((cur) => {
       if (p.unitDefault === "qty") {
         const idx = cur.findIndex((i) => i.productId === p.id);
@@ -943,14 +1034,64 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
           return next;
         }
       }
-      const line: OrderItemInput = {
-        productId: p.id, name: p.name, notes: "", department: "counter", unitPrice: p.pricePerUnit,
-        kg: p.unitDefault === "qty" ? null : 1,
-        quantity: p.unitDefault === "qty" ? 1 : null,
-        wantedPrice: null, lineTotal: null
-      };
-      return [...cur, { ...line, lineTotal: calculateLineTotal(line) }];
+      // buildCartLine (shared/posCart.ts) is the SAME function a manual
+      // tile tap and a barcode scan both call — no separate "scan add"
+      // code path that could drift from what tapping a tile does.
+      return [...cur, buildCartLine(p, wantedPrice)];
     });
+  };
+
+  // Global scanner-wedge capture: a hardware barcode scanner (USB or
+  // Bluetooth HID — both present to the OS as a plain keyboard) types its
+  // decoded digits as very fast, back-to-back keystrokes followed by
+  // Enter — nothing a human types matches that cadence, so
+  // feedScanBuffer (shared/scanBuffer.ts, unit-tested there against both
+  // fast and slow timing) distinguishes a real scan from ordinary typing
+  // without needing focus to sit in any particular field. Skipped while
+  // focus is in a genuine free-text field (buyer name/address/customer
+  // contact details) so a scan can never corrupt those, but works whether
+  // focus is on the search box, nowhere in particular, or the page body —
+  // exactly the "doesn't need to sit in a specific field" behavior asked
+  // for.
+  useEffect(() => {
+    const state = initScanBuffer();
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const active = document.activeElement;
+      const inProtectedField = active instanceof HTMLElement
+        && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")
+        && active.id !== "pos-scan-search";
+      if (inProtectedField) { state.buffer = ""; return; }
+
+      const completed = feedScanBuffer(state, e.key, Date.now());
+      if (completed) void handleScan(completed);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [products]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Shared by the global scanner-wedge listener and the manual search
+  // box's "Enter" fallback — a weigh-label decodes to an itemCode + the
+  // actual price that label was printed for (see parseWeighBarcode); a
+  // plain product barcode is looked up as-is. Gives an immediate audio +
+  // visual cue on success (see playScanBeep/flashLineIndex) since staff
+  // aren't necessarily watching the screen while scanning, and a brief,
+  // non-blocking inline message on failure rather than a modal that would
+  // stop them working.
+  const handleScan = async (code: string) => {
+    const weigh = parseWeighBarcode(code);
+    const lookupCode = weigh ? weigh.itemCode : code;
+    try {
+      const product = weigh ? await api.products.getByItemCode(lookupCode) : await api.products.getByBarcode(lookupCode);
+      scanFlashPending.current = true;
+      addToCart(product, weigh?.price);
+      playScanBeep();
+      setSearch("");
+    } catch {
+      setScanError(`No product found for "${code}"`);
+      window.setTimeout(() => setScanError(""), 3000);
+    }
   };
 
   const updateLine = (index: number, patch: Partial<OrderItemInput>) =>
@@ -960,9 +1101,18 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
       return { ...next, lineTotal: calculateLineTotal(next) };
     }));
 
-  const removeLine = (index: number) => setCart((cur) => cur.filter((_, i) => i !== index));
+  const removeLine = (index: number) => {
+    setCart((cur) => cur.filter((_, i) => i !== index));
+    setSelectedLine((cur) => (cur == null ? null : cur === index ? null : cur > index ? cur - 1 : cur));
+  };
 
-  const clearSale = () => { setCart([]); setDiscount(0); setBuyerName(""); setBuyerAddress(""); setPaymentMethod(null); setCashTendered(""); setCustomerNumber(""); setCustomerEmail(""); setError(""); };
+  const selectLine = (index: number) => {
+    setSelectedLine(index);
+    const line = cart[index];
+    setKeypadValue(line ? String(line.kg ?? line.quantity ?? "") : "");
+  };
+
+  const clearSale = () => { setCart([]); setDiscount(0); setBuyerName(""); setBuyerAddress(""); setPaymentMethod(null); setCashTendered(""); setCustomerNumber(""); setCustomerEmail(""); setError(""); setSelectedLine(null); setKeypadValue(""); setExpandedCategory(null); };
 
   // South African retail prices are required to be displayed VAT-inclusive
   // (Consumer Protection Act / VAT Act) — pricePerUnit is already the
@@ -975,6 +1125,22 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
   const clampedDiscount = Math.min(Math.max(0, discount), subtotal);
   const total = subtotal - clampedDiscount;
   const vat = total * (VAT_RATE / (1 + VAT_RATE));
+
+  // Numeric keypad, below the slip preview — the manual weight/quantity
+  // entry point for whichever line is selected (see selectLine), instead
+  // of inline +/- steppers cluttering the receipt-styled slip itself.
+  const selectedLineItem = selectedLine != null ? cart[selectedLine] : undefined;
+  const keypadDigit = (d: string) => setKeypadValue((cur) => (cur === "0" ? d : cur + d));
+  const keypadDecimal = () => setKeypadValue((cur) => (cur.includes(".") ? cur : cur ? cur + "." : "0."));
+  const keypadBackspace = () => setKeypadValue((cur) => cur.slice(0, -1));
+  const keypadClear = () => setKeypadValue("");
+  const applyKeypad = () => {
+    if (selectedLine == null || !selectedLineItem) return;
+    const n = Number(keypadValue);
+    if (!Number.isFinite(n) || n <= 0) return;
+    if (selectedLineItem.quantity != null) updateLine(selectedLine, { quantity: Math.round(n) });
+    else updateLine(selectedLine, { kg: Number(n.toFixed(3)) });
+  };
 
   // SARS requires a full tax invoice (buyer name + address, not just a
   // till slip) for any single sale over R5,000 — see the SARS Tax Invoice
@@ -1031,19 +1197,35 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
   return (
     <div className="pos-panel">
       <div className="pos-catalog">
-        <div className="pos-catalog-controls">
+        <div className="pos-scan-panel">
+          <label htmlFor="pos-scan-search" className="pos-scan-label">Scan or search a product</label>
           <div className="pos-search-row">
-            <input className="pos-search" placeholder="Search items…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <input
+              id="pos-scan-search"
+              className="pos-search"
+              placeholder="Scan a barcode, or type a name…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && search.trim()) void handleScan(search.trim()); }}
+              autoFocus
+            />
             <button type="button" className="secondary" onClick={() => { setReorderError(""); setReorderScanOpen(true); }} title="Scan a past receipt to add its items to this sale">
               <ScanLine size={16} /> Reorder
             </button>
           </div>
-          <div className="pos-category-tabs">
-            {categories.map((c) => (
-              <button key={c} type="button" className={`pos-category-tab ${category === c ? "active" : ""}`} onClick={() => setCategory(c)}>{c}</button>
-            ))}
-          </div>
+          {searchMatches.length > 0 && (
+            <div className="pos-search-matches">
+              {searchMatches.map((p) => (
+                <button type="button" key={p.id} className="pos-search-match" onClick={() => { addToCart(p); setSearch(""); }}>
+                  <span>{p.name}</span>
+                  <span className="muted">{p.pricePerUnit != null ? `${currency.format(p.pricePerUnit)}${p.unitDefault === "qty" ? " ea" : "/kg"}` : "—"}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {scanError && <p className="form-error">{scanError}</p>}
         </div>
+
         {reorderScanOpen && (
           <ScanCodeModal
             key={reorderScanAttempt}
@@ -1055,59 +1237,93 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
             onClose={() => setReorderScanOpen(false)}
           />
         )}
-        <div className="pos-product-grid">
-          {visibleProducts.map((p) => (
+
+        {quickPicks.length > 0 && (
+          <div className="pos-quickpicks">
+            <div className="pos-section-label">Quick picks</div>
+            <div className="pos-quickpicks-row">
+              {quickPicks.map((p) => (
+                <button
+                  key={p.id} type="button"
+                  className={`pos-product-tile ${p.currentCost == null ? "pos-product-tile-nocost" : ""}`}
+                  onClick={() => addToCart(p)}
+                  title={p.currentCost == null ? "No cost price set — can't be sold yet" : undefined}
+                >
+                  <span className={`pos-product-badge ${categoryBadgeClass(p.category || "Other")}`}>{initials(p.name)}</span>
+                  <span className="pos-product-name">{p.name}</span>
+                  <span className="pos-product-price">{p.pricePerUnit != null ? `${currency.format(p.pricePerUnit)}${p.unitDefault === "qty" ? " ea" : "/kg"}` : "—"}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="pos-section-label">Categories</div>
+        <div className="pos-category-tabs">
+          {categories.map((c) => (
             <button
-              key={p.id} type="button"
-              className={`pos-product-tile ${p.currentCost == null ? "pos-product-tile-nocost" : ""}`}
-              onClick={() => addToCart(p)}
-              title={p.currentCost == null ? "No cost price set — can't be sold yet" : undefined}
+              key={c} type="button"
+              className={`pos-category-tab ${expandedCategory === c ? "active" : ""}`}
+              onClick={() => setExpandedCategory((cur) => (cur === c ? null : c))}
             >
-              <span className={`pos-product-badge ${categoryBadgeClass(p.category || "Other")}`}>{initials(p.name)}</span>
-              <span className="pos-product-name">{p.name}</span>
-              <span className="pos-product-price">{p.pricePerUnit != null ? `${currency.format(p.pricePerUnit)}${p.unitDefault === "qty" ? " ea" : "/kg"}` : "—"}</span>
-              {p.currentCost == null && <span className="pos-product-nocost-flag">No cost price</span>}
+              {c}
             </button>
           ))}
-          {visibleProducts.length === 0 && <p className="report-empty">No items match.</p>}
         </div>
+
+        {expandedCategory && (
+          <div className="pos-product-grid">
+            {categoryProducts.map((p) => (
+              <button
+                key={p.id} type="button"
+                className={`pos-product-tile ${p.currentCost == null ? "pos-product-tile-nocost" : ""}`}
+                onClick={() => addToCart(p)}
+                title={p.currentCost == null ? "No cost price set — can't be sold yet" : undefined}
+              >
+                <span className={`pos-product-badge ${categoryBadgeClass(p.category || "Other")}`}>{initials(p.name)}</span>
+                <span className="pos-product-name">{p.name}</span>
+                <span className="pos-product-price">{p.pricePerUnit != null ? `${currency.format(p.pricePerUnit)}${p.unitDefault === "qty" ? " ea" : "/kg"}` : "—"}</span>
+                {p.currentCost == null && <span className="pos-product-nocost-flag">No cost price</span>}
+              </button>
+            ))}
+            {categoryProducts.length === 0 && <p className="report-empty">No items in this category.</p>}
+          </div>
+        )}
       </div>
 
       <div className="pos-receipt">
-        <h3>Receipt preview</h3>
-        <div className="pos-receipt-lines">
-          {cart.length === 0 && <p className="report-empty">Tap items to add them to the sale.</p>}
-          {cart.map((line, i) => (
-            <div className="pos-receipt-line" key={i}>
-              <div className="pos-receipt-line-top">
-                <span className="pos-receipt-line-name">{line.name}</span>
-                <button type="button" className="icon-button danger sm" onClick={() => setPendingRemoveIndex(i)} title="Remove" aria-label="Remove"><Trash2 size={16} /></button>
-              </div>
-              <div className="pos-receipt-line-controls">
-                {line.quantity != null ? (
-                  <div className="pos-stepper">
-                    <button type="button" onClick={() => updateLine(i, { quantity: Math.max(1, (line.quantity ?? 1) - 1) })}>−</button>
-                    <span>{line.quantity}</span>
-                    <button type="button" onClick={() => updateLine(i, { quantity: (line.quantity ?? 0) + 1 })}>+</button>
+        <div className="till-slip">
+          <div className="till-slip-header">
+            <div className="till-slip-business">{receiptBranding.siteName || "NemenchPos"}</div>
+            <div className="till-slip-meta">{new Date().toLocaleString(appSettings.locale, { dateStyle: "medium", timeStyle: "short" })}</div>
+          </div>
+          <div className="till-slip-divider" />
+          {cart.length === 0 ? (
+            <p className="till-slip-empty">Scan or tap an item to start the sale.</p>
+          ) : (
+            <div className="till-slip-lines">
+              {cart.map((line, i) => (
+                <button type="button" key={i} className={`till-slip-line ${selectedLine === i ? "selected" : ""} ${flashLineIndex === i ? "flash" : ""}`} onClick={() => selectLine(i)}>
+                  <div className="till-slip-line-top">
+                    <span className="till-slip-line-name">{line.name}</span>
+                    <span className="till-slip-line-total">{line.lineTotal != null ? currency.format(line.lineTotal) : "—"}</span>
                   </div>
-                ) : (
-                  <div className="pos-stepper">
-                    <button type="button" onClick={() => updateLine(i, { kg: Number(Math.max(0.1, (line.kg ?? 1) - 0.1).toFixed(2)) })}>−</button>
-                    <span>{(line.kg ?? 0).toFixed(2)} kg</span>
-                    <button type="button" onClick={() => updateLine(i, { kg: Number(((line.kg ?? 0) + 0.1).toFixed(2)) })}>+</button>
-                  </div>
-                )}
-                <span className="pos-receipt-line-total">{line.lineTotal != null ? currency.format(line.lineTotal) : "—"}</span>
-              </div>
+                  {line.kg != null && (
+                    <div className="till-slip-line-detail">{line.kg.toFixed(3)} kg @ {currency.format(line.unitPrice ?? 0)}/kg</div>
+                  )}
+                  {line.quantity != null && (
+                    <div className="till-slip-line-detail">{line.quantity} x {currency.format(line.unitPrice ?? 0)}</div>
+                  )}
+                </button>
+              ))}
             </div>
-          ))}
-        </div>
-        <div className="pos-receipt-breakdown">
-          <div className="pos-breakdown-row">
+          )}
+          <div className="till-slip-divider" />
+          <div className="till-slip-row">
             <span>Subtotal</span>
             <span>{currency.format(subtotal)}</span>
           </div>
-          <div className="pos-breakdown-row">
+          <div className="till-slip-row">
             <span>Discount</span>
             {clampedDiscount > 0 ? (
               <span>-{currency.format(clampedDiscount)} <button type="button" className="pos-discount-edit" onClick={() => setDiscountModalOpen(true)}>Edit</button></span>
@@ -1116,16 +1332,30 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
             )}
           </div>
           {receiptBranding.vatRegistered && (
-            <div className="pos-breakdown-row">
+            <div className="till-slip-row">
               <span>VAT incl. (15%)</span>
               <span>{currency.format(vat)}</span>
             </div>
           )}
-          <div className="pos-breakdown-row pos-breakdown-total">
-            <span>Total</span>
+          <div className="till-slip-divider" />
+          <div className="till-slip-row till-slip-total">
+            <span>TOTAL</span>
             <span>{currency.format(total)}</span>
           </div>
         </div>
+
+        <PosKeypad
+          value={keypadValue}
+          disabled={selectedLine == null}
+          unitLabel={selectedLineItem?.quantity != null ? "units" : "kg"}
+          onDigit={keypadDigit}
+          onDecimal={keypadDecimal}
+          onBackspace={keypadBackspace}
+          onClear={keypadClear}
+          onApply={applyKeypad}
+          onRemove={() => { if (selectedLine != null) setPendingRemoveIndex(selectedLine); }}
+        />
+
         {needsFullInvoice && (
           <div className="pos-invoice-fields">
             <p className="settings-hint">Sales over {currency.format(FULL_INVOICE_THRESHOLD)} legally require a full tax invoice — enter the buyer's details to continue.</p>
@@ -1178,7 +1408,7 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
         <div className="pos-receipt-actions">
           <button type="button" className="pos-clear-btn" disabled={cart.length === 0 || submitting} onClick={() => setPendingClearSale(true)}>Clear Sale</button>
           <button type="button" className="pos-charge-btn" disabled={!canCheckout} onClick={() => void checkout()}>
-            {submitting ? "Completing…" : `Charge ${currency.format(total)}`}
+            {submitting ? "Completing…" : `Pay now · ${currency.format(total)}`}
           </button>
         </div>
       </div>
@@ -1206,6 +1436,46 @@ function POSPanel({ products, printerMap, currentUser, onCompleted }: { products
           onClose={() => setDiscountModalOpen(false)}
         />
       )}
+    </div>
+  );
+}
+
+// Manual weight/quantity entry for whichever till slip line is currently
+// selected (see POSPanel's selectLine) — deliberately separate from the
+// slip itself so the slip can stay a clean, receipt-styled read display
+// rather than having +/- steppers baked into every line.
+function PosKeypad({ value, disabled, unitLabel, onDigit, onDecimal, onBackspace, onClear, onApply, onRemove }: {
+  value: string;
+  disabled: boolean;
+  unitLabel: "kg" | "units";
+  onDigit: (d: string) => void;
+  onDecimal: () => void;
+  onBackspace: () => void;
+  onClear: () => void;
+  onApply: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className={`pos-keypad ${disabled ? "pos-keypad-disabled" : ""}`}>
+      <div className="pos-keypad-display">
+        <span>{value || "0"}</span>
+        <span className="muted">{unitLabel}</span>
+      </div>
+      <div className="pos-keypad-grid">
+        {["7", "8", "9", "4", "5", "6", "1", "2", "3", ".", "0", "⌫"].map((k) => (
+          <button
+            key={k} type="button" disabled={disabled}
+            onClick={() => { if (k === "⌫") onBackspace(); else if (k === ".") onDecimal(); else onDigit(k); }}
+          >
+            {k}
+          </button>
+        ))}
+      </div>
+      <div className="pos-keypad-actions">
+        <button type="button" className="secondary" disabled={disabled} onClick={onClear}>Clear</button>
+        <button type="button" className="danger" disabled={disabled} onClick={onRemove}>Remove item</button>
+        <button type="button" disabled={disabled || !value} onClick={onApply}>Update</button>
+      </div>
     </div>
   );
 }
@@ -6607,13 +6877,6 @@ function nextDeptStatus(status: DeptStatus): DeptStatus | null {
   return i === -1 ? null : (deptStatusFlow[i + 1] ?? null);
 }
 
-function calculateLineTotal(item: OrderItemInput) {
-  if (item.wantedPrice) return Number(item.wantedPrice.toFixed(2));
-  if (!item.unitPrice) return null;
-  if (item.kg) return Number((item.kg * item.unitPrice).toFixed(2));
-  if (item.quantity) return Number((item.quantity * item.unitPrice).toFixed(2));
-  return null;
-}
 
 function tabTitle(tab: Tab) {
   return { orders: "New Order", pos: "POS", queue: "Prep Queue", history: "Order History", products: "Stock", users: "Users", settings: "Settings", reports: "Reports", weighIn: "Weigh-In", statistics: "Statistics", crm: "CRM", consolidate: "Consolidate Order", printLabels: "Print Labels" }[tab];

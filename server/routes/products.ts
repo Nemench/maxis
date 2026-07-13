@@ -16,6 +16,11 @@ const canQuickCreate = (req: AuthRequest) =>
 
 router.get("/", (_req, res) => { res.json(db.listProducts()); });
 
+// POS "quick picks" row — any authenticated till role (not admin-only),
+// since this is read at checkout time by cashiers, not just configured
+// by admins. See getQuickPickProducts for the pinned-vs-auto logic.
+router.get("/quick-picks", (_req, res) => { res.json(db.getQuickPickProducts()); });
+
 // Admin dashboard widget: active products with no cost price ever
 // recorded (see listProductsMissingCost) — deliberately never auto-filled
 // with 0, so these need someone to actually enter a real number.
