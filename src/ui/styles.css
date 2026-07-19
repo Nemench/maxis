@@ -13,27 +13,19 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 
-  /* Warm, butchery/deli-appropriate identity: rust/terracotta accent on a
-     cream ground, rather than the generic corporate SaaS blue-on-white this
-     started as. Variable names (--blue-*) are kept as-is even though the
-     color itself is no longer blue — renaming ~100 call sites for a purely
-     cosmetic identifier would be pure churn with zero visual benefit, and
-     these are also the exact names theme.ts's applyTheme/deriveShades
-     writes to when an admin picks a custom brand color, so the name is
-     load-bearing plumbing, not a description. */
-  --blue:       #b8502e;
-  --blue-dark:  #7a331c;
-  --blue-hover: #9c4326;
-  --blue-light: #f5e3d8;
-  --red:        #c0392b;
-  --red-light:  #fbeae7;
-  --green:       #3f7d32;
-  --green-light: #eaf3e6;
-  --border:     #e4d9cb;
-  --bg:         #faf6f0;
-  --panel:      #fffdfa;
-  --text:       #2a231c;
-  --muted:      #7a6f61;
+  --blue:       #1a47a0;
+  --blue-dark:  #0d2b6b;
+  --blue-hover: #143588;
+  --blue-light: #e8f0fc;
+  --red:        #c41f1f;
+  --red-light:  #fde8e8;
+  --green:       #1e7d34;
+  --green-light: #e3f5e6;
+  --border:     #c8d5ee;
+  --bg:         #ffffff;
+  --panel:      #ffffff;
+  --text:       #1a1a2e;
+  --muted:      #5a6480;
 
   /* Structural roles kept separate from --blue-dark/--blue-light above: those
      two are brand-color-derived and set as an *inline* style by theme.ts's
@@ -44,8 +36,8 @@
   --input-bg:         #ffffff;
   --chip-bg:           var(--blue-light);
   --accent-text:       var(--blue-dark);
-  --secondary-hover:  #ecd5c4;
-  --overlay:          rgba(42, 35, 28, 0.45);
+  --secondary-hover:  #d0dff7;
+  --overlay:          rgba(13, 43, 107, 0.45);
   color-scheme: light;
 
   /* POS product-tile categorical palette — fixed hue order, CVD-validated
@@ -62,20 +54,18 @@
 }
 
 :root[data-theme="dark"] {
-  /* Warm espresso/charcoal dark mode to match the light-mode identity above
-     — not the blue-black most "AI dashboard" dark themes default to. */
-  --border:     #3a332b;
-  --bg:         #1c1712;
-  --panel:      #241e18;
-  --text:       #f0e9df;
-  --muted:      #b3a696;
-  --green:       #7fc26a;
-  --green-light: #26301f;
+  --border:     #2c3348;
+  --bg:         #12141c;
+  --panel:      #1c2030;
+  --text:       #e7e9f2;
+  --muted:      #9aa3bd;
+  --green:       #4ade80;
+  --green-light: #17301f;
 
-  --input-bg:         #2b2420;
-  --chip-bg:           #3a2a20;
-  --accent-text:       #e2a480;
-  --secondary-hover:  #4a362a;
+  --input-bg:         #232838;
+  --chip-bg:           #232a42;
+  --accent-text:       #8fb4f5;
+  --secondary-hover:  #2c3654;
   --overlay:          rgba(0, 0, 0, 0.6);
   color-scheme: dark;
 
@@ -337,7 +327,7 @@ h2 { font-size: 17px; color: var(--accent-text); }
   color: #fff;
   border-radius: 8px;
   padding: 12px 16px;
-  box-shadow: 0 8px 24px rgba(122,51,28,0.25);
+  box-shadow: 0 8px 24px rgba(13,43,107,0.25);
   font-weight: 600;
   max-width: 360px;
   animation: toast-in 0.18s ease-out;
@@ -357,7 +347,7 @@ h2 { font-size: 17px; color: var(--accent-text); }
      card that already has a solid border doesn't also need to glow the
      theme color underneath it; that combination is what makes a screen
      read as templated rather than designed. */
-  box-shadow: 0 1px 3px rgba(42,35,28,0.08);
+  box-shadow: 0 1px 3px rgba(26,26,46,0.08);
 }
 
 /* ── Forms ── */
@@ -390,7 +380,7 @@ input, select, textarea {
 input:focus, select:focus, textarea:focus {
   outline: none;
   border-color: var(--blue);
-  box-shadow: 0 0 0 3px rgba(184,80,46,0.1);
+  box-shadow: 0 0 0 3px rgba(26,71,160,0.1);
 }
 
 textarea {
@@ -447,7 +437,7 @@ textarea {
   border-left: 5px solid var(--blue);
   border-radius: 8px;
   padding: 16px;
-  box-shadow: 0 1px 3px rgba(42,35,28,0.08);
+  box-shadow: 0 1px 3px rgba(26,26,46,0.08);
 }
 
 /* ── Ticket header ── */
@@ -1055,7 +1045,7 @@ th {
 }
 
 .format-picker-row-wrap.active {
-  background: var(--accent, #b8502e);
+  background: var(--accent, #1a47a0);
   color: #fff;
 }
 
@@ -2180,7 +2170,7 @@ button.sm {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 6px;
-  box-shadow: 0 8px 20px rgba(42,35,28,0.18);
+  box-shadow: 0 8px 20px rgba(26,26,46,0.18);
   z-index: 20;
   max-height: 220px;
   overflow-y: auto;
